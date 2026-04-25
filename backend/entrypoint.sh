@@ -31,5 +31,9 @@ echo "Demo ma'lumotlar tekshirilmoqda..."
 python manage.py seed_data
 echo "Demo ma'lumotlar tayyor"
 
+echo "Static fayllar yig'ilmoqda..."
+python manage.py collectstatic --noinput --clear
+echo "Static fayllar tayyor"
+
 echo "Server ishga tushmoqda..."
 exec "$@"
