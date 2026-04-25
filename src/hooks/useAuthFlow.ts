@@ -4,7 +4,7 @@ const KEY = 'parvona_auth_flow';
 
 interface FlowState {
   tab: 'login' | 'register';
-  loginMode: 'password' | 'otp';
+  loginMode: 'password' | 'otp' | 'telegram';
   otpStep: 1 | 2;
   otpEmail: string;
   otpRole: 'parent' | 'nanny';
@@ -13,6 +13,11 @@ interface FlowState {
   regEmail: string;
   regTelegramToken: string;
   regTelegramBotLink: string;
+  tgLoginStep: 1 | 2;
+  tgLoginPhone: string;
+  tgLoginToken: string;
+  tgLoginBotLink: string;
+  tgLoginHasTelegram: boolean;
 }
 
 const DEFAULTS: FlowState = {
@@ -26,6 +31,11 @@ const DEFAULTS: FlowState = {
   regEmail: '',
   regTelegramToken: '',
   regTelegramBotLink: '',
+  tgLoginStep: 1,
+  tgLoginHasTelegram: false,
+  tgLoginPhone: '',
+  tgLoginToken: '',
+  tgLoginBotLink: '',
 };
 
 function load(): FlowState {

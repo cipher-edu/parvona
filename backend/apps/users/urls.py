@@ -15,6 +15,8 @@ from .views import (
     RegisterOTPVerifyView,
     RegisterTelegramInitView,
     RegisterTelegramVerifyView,
+    TelegramOTPLoginInitView,
+    TelegramOTPLoginVerifyView,
     AdminUserListView,
     AdminUserDetailView,
     AdminSuspendUserView,
@@ -35,6 +37,8 @@ urlpatterns = [
     path('register/verify-otp/',      RegisterOTPVerifyView.as_view(),       name='register-otp-verify'),
     path('register/telegram/init/',   RegisterTelegramInitView.as_view(),    name='register-telegram-init'),
     path('register/telegram/verify/', RegisterTelegramVerifyView.as_view(),  name='register-telegram-verify'),
+    path('telegram/otp/init/',        TelegramOTPLoginInitView.as_view(),    name='telegram-otp-login-init'),
+    path('telegram/otp/verify/',      TelegramOTPLoginVerifyView.as_view(),  name='telegram-otp-login-verify'),
     path('token/refresh/',     TokenRefreshView.as_view(),  name='token-refresh'),
 
     # Profil

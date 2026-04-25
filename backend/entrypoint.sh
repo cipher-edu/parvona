@@ -6,7 +6,7 @@ if [ "${SKIP_SETUP}" = "true" ]; then
   exec "$@"
 fi
 
-echo "⏳ PostgreSQL kutilmoqda..."
+echo "PostgreSQL kutilmoqda..."
 until python -c "
 import psycopg
 import os
@@ -21,15 +21,15 @@ conn.close()
 " 2>/dev/null; do
   sleep 1
 done
-echo "✓ PostgreSQL tayyor"
+echo "PostgreSQL tayyor"
 
-echo "⏳ Migratsiyalar bajarilmoqda..."
+echo "Migratsiyalar bajarilmoqda..."
 python manage.py migrate --noinput
-echo "✓ Migratsiyalar bajarildi"
+echo "Migratsiyalar bajarildi"
 
-echo "⏳ Demo ma'lumotlar tekshirilmoqda..."
+echo "Demo ma'lumotlar tekshirilmoqda..."
 python manage.py seed_data
-echo "✓ Demo ma'lumotlar tayyor"
+echo "Demo ma'lumotlar tayyor"
 
-echo "✓ Server ishga tushmoqda..."
+echo "Server ishga tushmoqda..."
 exec "$@"

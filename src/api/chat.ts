@@ -26,7 +26,8 @@ export const getMessages = (bookingId: string) =>
 export const sendMessage = (bookingId: string, text: string) =>
   api.post<ConversationMessage>(`/api/chat/${bookingId}/send/`, { text });
 
-const WS_BASE = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+const WS_BASE = import.meta.env.VITE_WS_URL
+  ?? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
 
 export type ChatEventHandler = (msg: ChatMessage) => void;
 

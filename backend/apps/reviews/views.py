@@ -27,6 +27,22 @@ class ReviewCreateView(generics.CreateAPIView):
         )
         serializer.is_valid(raise_exception=True)
         review = serializer.save()
+
+        # Sharh qabul qilgan foydalanuvchiga Telegram bildirishnoma
+        try:
+            from apps.notifications.tasks import _tg_notify
+            stars = '⭐' * review.rating
+            author_role = 'Ota-ona' if review.author.role == 'parent' else 'Enaga'
+            _tg_notify(
+                review.target,
+                f'⭐ Yangi sharh — {stars}',
+                f'👤 {author_role}: *{review.author.name}*\n'
+                f'⭐ Baho: {review.rating}/5  {stars}\n'
+                + (f'💬 "{review.text[:200]}"' if review.text else ''),
+            )
+        except Exception:
+            pass
+
         return Response(ReviewSerializer(review).data, status=status.HTTP_201_CREATED)
 
 

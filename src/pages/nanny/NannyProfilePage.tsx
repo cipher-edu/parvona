@@ -1,8 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { Camera, ShieldCheck, MapPin, Clock, DollarSign } from 'lucide-react';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../../firebase';
 import { Card } from '../../components/ui/Card';
 import { Input, Textarea } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
@@ -10,77 +8,80 @@ import { Badge } from '../../components/ui/Badge';
 import { Avatar } from '../../components/ui/Avatar';
 import { PageSpinner } from '../../components/ui/Spinner';
 import { PageHeader } from '../../components/layout/PageHeader';
-import { useAuth } from '../../hooks/useAuth';
+import { useAuthStore } from '../../store/useAuthStore';
+import { api } from '../../api/client';
+import { DjangoUser, Nanny } from '../../api/types';
 import { getMyNannyProfile, updateMyNannyProfile, SKILL_LABELS } from '../../api/nannies';
-import { Nanny } from '../../api/types';
 
 const ALL_SKILLS = Object.entries(SKILL_LABELS).map(([v, l]) => ({ value: v, label: l }));
 
 interface NannyForm {
-  name:        string;
-  phone:       string;
-  age:         number;
-  experience:  number;
-  hourly_rate: number;
-  bio:         string;
+  name:          string;
+  phone:         string;
+  age:           number;
+  experience:    number;
+  hourly_rate:   number;
+  bio:           string;
   location_name: string;
-  skills:      string[];
+  skills:        string[];
 }
 
 export default function NannyProfilePage() {
-  const { user } = useAuth();
-  const [profile, setProfile]       = useState<Nanny | null>(null);
-  const [form, setForm]             = useState<NannyForm>({ name: '', phone: '', age: 25, experience: 1, hourly_rate: 30000, bio: '', location_name: '', skills: [] });
-  const [loading, setLoading]       = useState(true);
-  const [saving, setSaving]         = useState(false);
-  const [isEditing, setEditing]     = useState(false);
-  const [success, setSuccess]       = useState(false);
+  const { djangoUser, setDjangoUser } = useAuthStore();
+  const [profile, setProfile]     = useState<Nanny | null>(null);
+  const [form, setForm]           = useState<NannyForm>({
+    name: '', phone: '', age: 25, experience: 1,
+    hourly_rate: 30000, bio: '', location_name: '', skills: [],
+  });
+  const [loading, setLoading]     = useState(true);
+  const [saving, setSaving]       = useState(false);
+  const [isEditing, setEditing]   = useState(false);
+  const [success, setSuccess]     = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [photoUploading, setPhotoUploading] = React.useState(false);
 
   useEffect(() => {
-    if (!user) return;
-    Promise.all([
-      getMyNannyProfile(),
-      getDoc(doc(db, 'users', user.uid)),
-    ]).then(([p, snap]) => {
-      setProfile(p);
-      setForm({
-        name:          snap.exists() ? snap.data().name : user.displayName || '',
-        phone:         snap.exists() ? snap.data().phone || '' : '',
-        age:           p.age,
-        experience:    p.experience,
-        hourly_rate:   p.hourly_rate,
-        bio:           p.bio || '',
-        location_name: p.location_name,
-        skills:        p.skills as string[],
-      });
-    }).catch(() => {}).finally(() => setLoading(false));
-  }, [user]);
+    if (!djangoUser) { setLoading(false); return; }
+    getMyNannyProfile()
+      .then(p => {
+        setProfile(p);
+        setForm({
+          name:          djangoUser.name || '',
+          phone:         djangoUser.phone || '',
+          age:           p.age,
+          experience:    p.experience,
+          hourly_rate:   p.hourly_rate,
+          bio:           p.bio || '',
+          location_name: p.location_name,
+          skills:        p.skills as string[],
+        });
+      })
+      .catch(() => {
+        setForm(f => ({ ...f, name: djangoUser.name || '', phone: djangoUser.phone || '' }));
+      })
+      .finally(() => setLoading(false));
+  }, [djangoUser]);
 
   const toggleSkill = (skill: string) => {
     setForm(f => ({
       ...f,
-      skills: f.skills.includes(skill) ? f.skills.filter(s => s !== skill) : [...f.skills, skill],
+      skills: f.skills.includes(skill)
+        ? f.skills.filter(s => s !== skill)
+        : [...f.skills, skill],
     }));
   };
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      alert('Rasm hajmi 5MB dan katta bo\'lishi mumkin emas');
-      return;
-    }
+    if (file.size > 5 * 1024 * 1024) { alert('Rasm hajmi 5MB dan oshmasin'); return; }
     setPhotoUploading(true);
     try {
       const formData = new FormData();
       formData.append('photo', file);
-      const { api } = await import('../../api/client');
-      await api.patch('/api/users/me/', formData);
-      window.location.reload();
-    } catch (err) {
-      console.error('Rasm yuklashda xatolik:', err);
+      const updated = await api.patch<DjangoUser>('/api/auth/me/', formData);
+      setDjangoUser(updated);
+    } catch {
       alert('Rasm yuklanmadi. Qayta urinib ko\'ring.');
     } finally {
       setPhotoUploading(false);
@@ -89,11 +90,10 @@ export default function NannyProfilePage() {
   };
 
   const handleSave = async () => {
-    if (!user) return;
     setSaving(true);
     try {
-      await Promise.all([
-        updateDoc(doc(db, 'users', user.uid), { name: form.name, phone: form.phone }),
+      const [updated] = await Promise.all([
+        api.patch<DjangoUser>('/api/auth/me/', { name: form.name, phone: form.phone }),
         updateMyNannyProfile({
           age:           form.age,
           experience:    form.experience,
@@ -103,11 +103,12 @@ export default function NannyProfilePage() {
           skills:        form.skills as unknown as string[],
         }),
       ]);
+      setDjangoUser(updated);
       setEditing(false);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
-    } catch (e) {
-      handleFirestoreError(e, OperationType.UPDATE, `users/${user.uid}`);
+    } catch {
+      alert('Saqlashda xatolik yuz berdi');
     } finally {
       setSaving(false);
     }
@@ -130,24 +131,19 @@ export default function NannyProfilePage() {
         </motion.div>
       )}
 
-      {/* Profile header */}
       <Card padding="lg" className="mb-6">
         <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 mb-6 pb-6 border-b border-slate-100">
           <div className="relative">
-            <Avatar src={user?.photoURL} name={form.name} size="xl" />
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={handlePhotoUpload}
-            />
+            <Avatar src={djangoUser?.photo ?? null} name={form.name} size="xl" />
+            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handlePhotoUpload} />
             <button
               className="absolute bottom-0 right-0 w-8 h-8 bg-white border border-slate-200 rounded-full flex items-center justify-center text-slate-500 hover:text-purple-600 shadow-sm transition-colors disabled:opacity-50"
               onClick={() => fileInputRef.current?.click()}
               disabled={photoUploading}
             >
-              {photoUploading ? <div className="w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" /> : <Camera className="w-4 h-4" />}
+              {photoUploading
+                ? <div className="w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                : <Camera className="w-4 h-4" />}
             </button>
           </div>
           <div className="text-center sm:text-left">
@@ -176,7 +172,6 @@ export default function NannyProfilePage() {
           </div>
         </div>
 
-        {/* Form fields */}
         <div className="space-y-5">
           <div className="grid sm:grid-cols-2 gap-4">
             <Input label="Ism familiya" value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} disabled={!isEditing} />
@@ -210,7 +205,6 @@ export default function NannyProfilePage() {
             placeholder="O'zingiz haqingizda qisqacha yozing..."
           />
 
-          {/* Skills */}
           <div>
             <p className="text-sm font-medium text-slate-700 mb-2">Ko'nikmalar</p>
             <div className="flex flex-wrap gap-2">

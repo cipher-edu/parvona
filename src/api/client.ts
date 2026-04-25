@@ -77,9 +77,9 @@ export async function apiRequest<T = unknown>(
     if (qs) url += `?${qs}`;
   }
 
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  };
+  const isFormData = body instanceof FormData;
+  const headers: Record<string, string> = {};
+  if (!isFormData) headers['Content-Type'] = 'application/json';
 
   if (auth) {
     let token = tokenStorage.getAccess();
@@ -89,7 +89,7 @@ export async function apiRequest<T = unknown>(
   const init: RequestInit = {
     method,
     headers,
-    body: body !== undefined ? JSON.stringify(body) : undefined,
+    body: body !== undefined ? (isFormData ? body : JSON.stringify(body)) : undefined,
     signal,
   };
 

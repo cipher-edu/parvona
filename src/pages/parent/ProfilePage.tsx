@@ -1,15 +1,15 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
 import { Camera, ShieldCheck, Mail, Phone, User as UserIcon } from 'lucide-react';
-import { doc, getDoc, updateDoc } from 'firebase/firestore';
-import { db, handleFirestoreError, OperationType } from '../../firebase';
 import { Card } from '../../components/ui/Card';
 import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
 import { Avatar } from '../../components/ui/Avatar';
 import { PageSpinner } from '../../components/ui/Spinner';
 import { PageHeader } from '../../components/layout/PageHeader';
-import { useAuth } from '../../hooks/useAuth';
+import { useAuthStore } from '../../store/useAuthStore';
+import { api } from '../../api/client';
+import { DjangoUser } from '../../api/types';
 
 interface ProfileForm {
   name:  string;
@@ -17,7 +17,7 @@ interface ProfileForm {
 }
 
 export default function ProfilePage() {
-  const { user, role } = useAuth();
+  const { djangoUser, setDjangoUser } = useAuthStore();
   const [form, setForm]         = useState<ProfileForm>({ name: '', phone: '' });
   const [loading, setLoading]   = useState(true);
   const [saving, setSaving]     = useState(false);
@@ -27,33 +27,22 @@ export default function ProfilePage() {
   const [photoUploading, setPhotoUploading] = React.useState(false);
 
   useEffect(() => {
-    if (!user) return;
-    getDoc(doc(db, 'users', user.uid))
-      .then(snap => {
-        if (snap.exists()) {
-          const d = snap.data();
-          setForm({ name: d.name || user.displayName || '', phone: d.phone || '' });
-        }
-      })
-      .finally(() => setLoading(false));
-  }, [user]);
+    if (!djangoUser) { setLoading(false); return; }
+    setForm({ name: djangoUser.name || '', phone: djangoUser.phone || '' });
+    setLoading(false);
+  }, [djangoUser]);
 
   const handlePhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    if (file.size > 5 * 1024 * 1024) {
-      alert('Rasm hajmi 5MB dan katta bo\'lishi mumkin emas');
-      return;
-    }
+    if (file.size > 5 * 1024 * 1024) { alert('Rasm hajmi 5MB dan oshmasin'); return; }
     setPhotoUploading(true);
     try {
       const formData = new FormData();
       formData.append('photo', file);
-      const { api } = await import('../../api/client');
-      await api.patch('/api/users/me/', formData);
-      window.location.reload();
-    } catch (err) {
-      console.error('Rasm yuklashda xatolik:', err);
+      const updated = await api.patch<DjangoUser>('/api/auth/me/', formData);
+      setDjangoUser(updated);
+    } catch {
       alert('Rasm yuklanmadi. Qayta urinib ko\'ring.');
     } finally {
       setPhotoUploading(false);
@@ -62,24 +51,24 @@ export default function ProfilePage() {
   };
 
   const handleSave = async () => {
-    if (!user) return;
     setSaving(true);
     try {
-      await updateDoc(doc(db, 'users', user.uid), {
-        name: form.name,
-        phone: form.phone,
-      });
+      const updated = await api.patch<DjangoUser>('/api/auth/me/', { name: form.name, phone: form.phone });
+      setDjangoUser(updated);
       setEditing(false);
       setSuccess(true);
       setTimeout(() => setSuccess(false), 3000);
-    } catch (e) {
-      handleFirestoreError(e, OperationType.UPDATE, `users/${user.uid}`);
+    } catch {
+      alert('Saqlashda xatolik yuz berdi');
     } finally {
       setSaving(false);
     }
   };
 
   if (loading) return <PageSpinner />;
+
+  const role = djangoUser?.role;
+  const photoUrl = djangoUser?.photo ?? null;
 
   return (
     <div className="p-6 lg:p-8 max-w-2xl">
@@ -97,39 +86,29 @@ export default function ProfilePage() {
       )}
 
       <Card padding="lg">
-        {/* Avatar */}
         <div className="flex flex-col sm:flex-row items-center sm:items-start gap-6 mb-8 pb-8 border-b border-slate-100">
           <div className="relative">
-            <Avatar src={user?.photoURL} name={form.name} size="xl" />
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept="image/*"
-              className="hidden"
-              onChange={handlePhotoUpload}
-            />
+            <Avatar src={photoUrl} name={form.name} size="xl" />
+            <input ref={fileInputRef} type="file" accept="image/*" className="hidden" onChange={handlePhotoUpload} />
             <button
               className="absolute bottom-0 right-0 w-8 h-8 bg-white border border-slate-200 rounded-full flex items-center justify-center text-slate-500 hover:text-purple-600 shadow-sm transition-colors disabled:opacity-50"
               onClick={() => fileInputRef.current?.click()}
               disabled={photoUploading}
             >
-              {photoUploading ? <div className="w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" /> : <Camera className="w-4 h-4" />}
+              {photoUploading
+                ? <div className="w-3 h-3 border-2 border-purple-500 border-t-transparent rounded-full animate-spin" />
+                : <Camera className="w-4 h-4" />}
             </button>
           </div>
           <div>
             <h2 className="text-xl font-bold text-slate-900">{form.name}</h2>
-            <p className="text-sm text-slate-500 mt-0.5">{user?.email}</p>
-            <div className="flex items-center gap-1.5 mt-2">
-              <ShieldCheck className="w-4 h-4 text-green-500" />
-              <span className="text-xs font-medium text-green-600">Google orqali tasdiqlangan</span>
-            </div>
+            <p className="text-sm text-slate-500 mt-0.5">{djangoUser?.email}</p>
             <p className="text-xs text-purple-600 font-medium mt-1 capitalize">
               {role === 'parent' ? 'Ota-ona' : role === 'nanny' ? 'Enaga' : 'Admin'}
             </p>
           </div>
         </div>
 
-        {/* Form */}
         <div className="space-y-5">
           <Input
             label="Ism familiya"
@@ -142,9 +121,9 @@ export default function ProfilePage() {
           <Input
             label="Email"
             icon={<Mail className="w-4 h-4" />}
-            value={user?.email || ''}
+            value={djangoUser?.email || ''}
             disabled
-            hint="Email Google orqali belgilanadi va o'zgartirib bo'lmaydi"
+            hint="Email o'zgartirib bo'lmaydi"
           />
           <Input
             label="Telefon raqam"

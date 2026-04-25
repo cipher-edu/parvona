@@ -14,7 +14,8 @@ import { useAuth } from '../../hooks/useAuth';
 import { ConversationMessage } from '../../api/types';
 import { tokenStorage } from '../../api/client';
 
-const WS_BASE = import.meta.env.VITE_WS_URL || 'ws://localhost:8000';
+const WS_BASE = import.meta.env.VITE_WS_URL
+  ?? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
 
 export default function MessagesPage() {
   const { djangoUser } = useAuth();

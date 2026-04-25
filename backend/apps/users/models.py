@@ -51,6 +51,12 @@ class User(AbstractBaseUser, PermissionsMixin, BaseModel):
     is_active = models.BooleanField(default=True, verbose_name='Faol')
     is_staff  = models.BooleanField(default=False, verbose_name='Staff')
 
+    # Telegram
+    telegram_user_id = models.BigIntegerField(
+        null=True, blank=True, unique=True,
+        verbose_name='Telegram ID',
+    )
+
     # Referral
     referral_code = models.CharField(
         max_length=12, unique=True, default=_gen_ref_code,

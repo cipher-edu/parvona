@@ -26,7 +26,9 @@ export function useNotifications(
   const connect = useCallback(() => {
     if (!token) return;
 
-    const wsUrl = `${import.meta.env.VITE_WS_URL ?? 'ws://localhost:8000'}/ws/notifications/`;
+    const base = import.meta.env.VITE_WS_URL
+      ?? `${window.location.protocol === 'https:' ? 'wss:' : 'ws:'}//${window.location.host}`;
+    const wsUrl = `${base}/ws/notifications/`;
     const ws = new WebSocket(wsUrl);
     wsRef.current = ws;
 

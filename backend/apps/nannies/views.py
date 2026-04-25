@@ -184,6 +184,28 @@ class AdminVerifyNannyView(APIView):
 
         invalidate_nanny_cache(str(profile.id))
 
+        # Enagaga Telegram bildirishnoma
+        try:
+            from apps.notifications.tasks import _tg_notify
+            if profile.is_verified:
+                _tg_notify(
+                    profile.user,
+                    '✅ Profilingiz tasdiqlandi!',
+                    f'Salom, *{profile.user.name}*!\n'
+                    f'Sizning Parvona enaga profilingiz admin tomonidan tasdiqlandi.\n'
+                    f'Endi ota-onalar sizni ko\'rishi mumkin. 🎉',
+                )
+            else:
+                _tg_notify(
+                    profile.user,
+                    '⚠️ Profil tasdiqdan o\'chirildi',
+                    f'Salom, *{profile.user.name}*!\n'
+                    f'Sizning profil tasdiqingiz olib tashlandi.\n'
+                    f'Batafsil ma\'lumot uchun saytga kiring yoki admin bilan bog\'laning.',
+                )
+        except Exception:
+            pass
+
         action = 'tasdiqlandi' if profile.is_verified else 'tasdiq olib tashlandi'
         return Response({
             'message': f'Enaga {action}',
@@ -258,6 +280,17 @@ class AdminVerifyNannyPostView(APIView):
         profile.verified_at = timezone.now()
         profile.save(update_fields=['is_verified', 'verified_by', 'verified_at'])
         invalidate_nanny_cache(str(profile.id))
+        try:
+            from apps.notifications.tasks import _tg_notify
+            _tg_notify(
+                profile.user,
+                '✅ Profilingiz tasdiqlandi!',
+                f'Salom, *{profile.user.name}*!\n'
+                f'Sizning Parvona enaga profilingiz tasdiqlandi.\n'
+                f'Endi ota-onalar sizni ko\'rishi mumkin. 🎉',
+            )
+        except Exception:
+            pass
         return Response({'message': 'Enaga tasdiqlandi', 'is_verified': True})
 
 
@@ -273,4 +306,15 @@ class AdminUnverifyNannyView(APIView):
         profile.verified_at = None
         profile.save(update_fields=['is_verified', 'verified_by', 'verified_at'])
         invalidate_nanny_cache(str(profile.id))
+        try:
+            from apps.notifications.tasks import _tg_notify
+            _tg_notify(
+                profile.user,
+                '⚠️ Profil tasdiqdan o\'chirildi',
+                f'Salom, *{profile.user.name}*!\n'
+                f'Sizning profil tasdiqingiz olib tashlandi.\n'
+                f'Batafsil ma\'lumot uchun admin bilan bog\'laning.',
+            )
+        except Exception:
+            pass
         return Response({'message': 'Enaga tasdiqlanmagan deb belgilandi', 'is_verified': False})

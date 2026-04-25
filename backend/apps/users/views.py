@@ -528,6 +528,196 @@ class EmailOTPVerifyView(APIView):
         refresh['email'] = user.email
 
         logger.info(f'Email OTP orqali kirdi: {email} (yangi={created})')
+
+        if user.telegram_user_id:
+            try:
+                from django.utils import timezone
+                from apps.users.management.commands.telegram_handlers import send_notification_to_user
+                now = timezone.localtime()
+                role_display = {'parent': 'Ota-ona', 'nanny': 'Enaga', 'admin': 'Admin'}.get(user.role, user.role)
+                send_notification_to_user(
+                    user.telegram_user_id,
+                    'Tizimga kirish',
+                    f'Hisobingizga muvaffaqiyatli kirildi.\n'
+                    f'📅 Sana: {now.strftime("%d.%m.%Y")}\n'
+                    f'🕐 Vaqt: {now.strftime("%H:%M")}\n'
+                    f'👤 Rol: {role_display}\n'
+                    f'📧 Email: {email}',
+                )
+            except Exception as exc:
+                logger.warning(f'Login bildirishnoma yuborishda xato: {exc}')
+
+        return Response({
+            'access':  str(refresh.access_token),
+            'refresh': str(refresh),
+            'user':    UserSerializer(user).data,
+        })
+
+
+class TelegramOTPLoginInitView(APIView):
+    """
+    POST /api/auth/telegram/otp/init/
+    Telefon raqam bo'yicha foydalanuvchini topib, Telegram orqali OTP yuboradi.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes   = [AuthRateThrottle]
+
+    def post(self, request):
+        import secrets as _secrets
+        from django.conf import settings as django_settings
+
+        phone = request.data.get('phone', '').strip()
+        if not phone:
+            return Response(
+                {'code': 'MISSING_PHONE', 'message': 'Telefon raqam majburiy'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        # +998901234567, 998901234567, 0901234567 formatlarini normallashtirish
+        digits = ''.join(c for c in phone if c.isdigit())
+        if digits.startswith('998') and len(digits) == 12:
+            normalized = f'+{digits}'
+        elif digits.startswith('0') and len(digits) == 10:
+            normalized = f'+998{digits[1:]}'
+        elif len(digits) == 9:
+            normalized = f'+998{digits}'
+        else:
+            normalized = phone
+
+        users = User.objects.filter(phone=normalized, is_active=True)
+        if not users.exists() and len(digits) >= 9:
+            users = User.objects.filter(phone__endswith=digits[-9:], is_active=True)
+
+        if not users.exists():
+            return Response(
+                {'code': 'USER_NOT_FOUND', 'message': 'Bu telefon raqam ro\'yxatda yo\'q'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if users.count() > 1:
+            return Response(
+                {'code': 'MULTIPLE_ACCOUNTS', 'message': 'Bu raqam bilan bir nechta hisob mavjud. Email orqali kiring.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        user = users.first()
+
+        bot_name = getattr(django_settings, 'TELEGRAM_BOT_NAME', 'ParvonaBot')
+        login_token = _secrets.token_urlsafe(20)
+        otp = str(_secrets.randbelow(900000) + 100000)
+
+        cache.set(f'tg_login_otp:{login_token}', otp,         timeout=300)
+        cache.set(f'tg_login_uid:{login_token}', str(user.id), timeout=300)
+
+        bot_link = f'https://t.me/{bot_name}?start=LOGIN_{login_token}'
+
+        if user.telegram_user_id:
+            try:
+                from apps.users.management.commands.telegram_handlers import send_notification_to_user
+                send_notification_to_user(
+                    user.telegram_user_id,
+                    'Kirish kodi',
+                    f'Sizning kirish kodingiz: *{otp}*\n\nKod 5 daqiqa amal qiladi.',
+                )
+            except Exception as exc:
+                logger.warning(f'Telegram login OTP yuborishda xato: {exc}')
+
+        logger.info(f'Telegram OTP login boshlandi: {user.email} (tel: {phone})')
+        return Response({
+            'login_token':  login_token,
+            'bot_link':     bot_link,
+            'has_telegram': bool(user.telegram_user_id),
+            'message':      'Telegram botga o\'ting va OTP kodni oling',
+        })
+
+
+class TelegramOTPLoginVerifyView(APIView):
+    """
+    POST /api/auth/telegram/otp/verify/
+    OTP ni tekshirib JWT qaytaradi.
+    """
+    permission_classes = [AllowAny]
+    throttle_classes   = [AuthRateThrottle]
+
+    def post(self, request):
+        login_token = request.data.get('login_token', '').strip()
+        otp         = request.data.get('otp', '').strip()
+
+        if not login_token or not otp:
+            return Response(
+                {'code': 'MISSING_FIELDS', 'message': 'login_token va OTP majburiy'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        saved_otp = cache.get(f'tg_login_otp:{login_token}')
+        user_id   = cache.get(f'tg_login_uid:{login_token}')
+
+        if not saved_otp or not user_id:
+            return Response(
+                {'code': 'OTP_EXPIRED', 'message': 'Kod muddati o\'tgan. Qaytadan boshlang.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        attempts_key = f'tg_login_attempts:{login_token}'
+        attempts = cache.get(attempts_key, 0)
+        if attempts >= 5:
+            cache.delete(f'tg_login_otp:{login_token}')
+            cache.delete(f'tg_login_uid:{login_token}')
+            return Response(
+                {'code': 'TOO_MANY_ATTEMPTS', 'message': 'Juda ko\'p urinish. Qaytadan boshlang.'},
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+            )
+
+        if saved_otp != otp:
+            cache.set(attempts_key, attempts + 1, timeout=300)
+            remaining = 5 - attempts - 1
+            return Response(
+                {'code': 'INVALID_OTP', 'message': f'Noto\'g\'ri kod. {remaining} ta urinish qoldi.'},
+                status=status.HTTP_401_UNAUTHORIZED,
+            )
+
+        cache.delete(f'tg_login_otp:{login_token}')
+        cache.delete(f'tg_login_uid:{login_token}')
+        cache.delete(attempts_key)
+
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response(
+                {'code': 'USER_NOT_FOUND', 'message': 'Foydalanuvchi topilmadi'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        if not user.is_active:
+            return Response(
+                {'code': 'ACCOUNT_SUSPENDED', 'message': 'Hisobingiz bloklangan'},
+                status=status.HTTP_403_FORBIDDEN,
+            )
+
+        refresh = RefreshToken.for_user(user)
+        refresh['role']  = user.role
+        refresh['name']  = user.name
+        refresh['email'] = user.email
+
+        # Kirish bildirishnomasini Telegram ga yuborish
+        now = timezone.now()
+        role_display = {'parent': 'Ota-ona 👨‍👩‍👧', 'nanny': 'Enaga 👩‍🍼', 'admin': 'Admin 🛡️'}.get(user.role, user.role)
+        if user.telegram_user_id:
+            try:
+                from apps.users.management.commands.telegram_handlers import send_notification_to_user
+                send_notification_to_user(
+                    user.telegram_user_id,
+                    'Tizimga kirish',
+                    f'Hisobingizga muvaffaqiyatli kirildi.\n'
+                    f'📅 Sana: {now.strftime("%d.%m.%Y")}\n'
+                    f'🕐 Vaqt: {now.strftime("%H:%M")}\n'
+                    f'👤 Rol: {role_display}\n'
+                    f'📧 Email: {user.email}',
+                )
+            except Exception as exc:
+                logger.warning(f'Login bildirishnoma yuborishda xato: {exc}')
+
+        logger.info(f'Telegram OTP login: {user.email}')
         return Response({
             'access':  str(refresh.access_token),
             'refresh': str(refresh),
@@ -674,6 +864,12 @@ class RegisterTelegramVerifyView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        if telegram_chat_id and User.objects.filter(telegram_user_id=telegram_chat_id).exists():
+            return Response(
+                {'code': 'TELEGRAM_TAKEN', 'message': 'Bu Telegram profil allaqachon boshqa hisob bilan bog\'liq.'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
         user = User.objects.create_user(
             email    = reg_data['email'],
             name     = reg_data['name'],
@@ -700,6 +896,30 @@ class RegisterTelegramVerifyView(APIView):
         refresh['role']  = user.role
         refresh['name']  = user.name
         refresh['email'] = user.email
+
+        # Admin va yangi foydalanuvchiga Telegram bildirishnoma
+        try:
+            from apps.notifications.tasks import _tg_notify, _tg_notify_admins
+            role_display = {'parent': 'Ota-ona', 'nanny': 'Enaga'}.get(user.role, user.role)
+            _tg_notify_admins(
+                '🆕 Yangi foydalanuvchi (Telegram)',
+                f'👤 {user.name}\n'
+                f'📧 {user.email}\n'
+                f'📱 {user.phone or "—"}\n'
+                f'🎭 Rol: {role_display}\n'
+                f'📅 {timezone.now().strftime("%d.%m.%Y %H:%M")}',
+            )
+            if user.telegram_user_id:
+                _tg_notify(
+                    user,
+                    '🎉 Xush kelibsiz, Parvona!',
+                    f'Salom, *{user.name}*!\n'
+                    f'Telegram orqali ro\'yxatdan o\'tish yakunlandi.\n'
+                    f'🎭 Rolingiz: {role_display}\n\n'
+                    f'Parvona — ishonchli enaga topish platformasi.',
+                )
+        except Exception as exc:
+            logger.warning(f'Ro\'yxatdan o\'tish bildirishnoma xatosi: {exc}')
 
         logger.info(f'Telegram OTP orqali ro\'yxatdan o\'tdi: {reg_data["email"]}')
         return Response({
@@ -904,6 +1124,30 @@ class RegisterOTPVerifyView(APIView):
         refresh['role']  = user.role
         refresh['name']  = user.name
         refresh['email'] = user.email
+
+        # Admin va yangi foydalanuvchiga Telegram bildirishnoma
+        try:
+            from apps.notifications.tasks import _tg_notify, _tg_notify_admins
+            role_display = {'parent': 'Ota-ona', 'nanny': 'Enaga'}.get(user.role, user.role)
+            _tg_notify_admins(
+                '🆕 Yangi foydalanuvchi',
+                f'👤 {user.name}\n'
+                f'📧 {user.email}\n'
+                f'📱 {user.phone or "—"}\n'
+                f'🎭 Rol: {role_display}\n'
+                f'📅 {timezone.now().strftime("%d.%m.%Y %H:%M")}',
+            )
+            if user.telegram_user_id:
+                _tg_notify(
+                    user,
+                    '🎉 Xush kelibsiz, Parvona!',
+                    f'Salom, *{user.name}*!\n'
+                    f'Ro\'yxatdan o\'tish muvaffaqiyatli yakunlandi.\n'
+                    f'🎭 Sizning rolingiz: {role_display}\n\n'
+                    f'Parvona — ishonchli enaga topish platformasi.',
+                )
+        except Exception as exc:
+            logger.warning(f'Ro\'yxatdan o\'tish bildirishnoma xatosi: {exc}')
 
         logger.info(f'Email OTP orqali ro\'yxatdan o\'tdi: {email}')
         return Response({

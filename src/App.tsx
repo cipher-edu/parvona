@@ -6,7 +6,7 @@ import 'leaflet/dist/leaflet.css';
 import { getNannies, getNannyReviews, formatHourlyRate, SKILL_LABELS } from './api/nannies';
 import { createBooking } from './api/bookings';
 import { getLatestReviews } from './api/reviews';
-import { sendEmailOTP, registerSendOTP, registerTelegramInit } from './api/auth';
+import { sendEmailOTP, registerSendOTP, registerTelegramInit, telegramOTPLoginInit, telegramOTPLoginVerify } from './api/auth';
 import { Nanny, Review } from './api/types';
 import { useAuthStore } from './store/useAuthStore';
 import { useAuthFlow, clearAuthFlow } from './hooks/useAuthFlow';
@@ -508,7 +508,7 @@ interface AuthModalProps {
 function AuthModal({ isOpen, onClose, onGoogleLogin, onTelegramLogin, onEmailLogin, onEmailOTPLogin, onRegisterComplete, onRegisterTelegramComplete, authLoading, authError, clearError }: AuthModalProps) {
   // Persistent state — sessionStorage orqali sahifa o'zgarsa ham saqlanadi
   const flow = useAuthFlow();
-  const { tab, loginMode, otpStep, otpEmail, otpRole, regStep, regOtpMethod, regEmail, regTelegramToken, regTelegramBotLink } = flow;
+  const { tab, loginMode, otpStep, otpEmail, otpRole, regStep, regOtpMethod, regEmail, regTelegramToken, regTelegramBotLink, tgLoginStep, tgLoginPhone, tgLoginToken, tgLoginBotLink, tgLoginHasTelegram } = flow;
 
   const [showPw, setShowPw] = useState(false);
   const [showPw2, setShowPw2] = useState(false);
@@ -543,6 +543,12 @@ function AuthModal({ isOpen, onClose, onGoogleLogin, onTelegramLogin, onEmailLog
   const [regTelegramOtpCode, setRegTelegramOtpCode] = useState('');
   const [regTelegramVerifying, setRegTelegramVerifying] = useState(false);
 
+  // Telegram login state
+  const [tgLoginOtp, setTgLoginOtp] = useState('');
+  const [tgLoginSending, setTgLoginSending] = useState(false);
+  const [tgLoginVerifying, setTgLoginVerifying] = useState(false);
+  const [tgLoginError, setTgLoginError] = useState('');
+
   // Modal yopilganda faqat kirish kodlari va xatolarni tozalash
   // (flow holati — tab, regStep, regTelegramToken — sessionStorage da saqlanadi)
   React.useEffect(() => {
@@ -576,12 +582,47 @@ function AuthModal({ isOpen, onClose, onGoogleLogin, onTelegramLogin, onEmailLog
     }
   };
 
-  const switchLoginMode = (mode: 'password' | 'otp') => {
-    flow.set({ loginMode: mode, otpStep: 1 });
+  const switchLoginMode = (mode: 'password' | 'otp' | 'telegram') => {
+    flow.set({ loginMode: mode, otpStep: 1, tgLoginStep: 1, tgLoginPhone: '', tgLoginToken: '', tgLoginBotLink: '', tgLoginHasTelegram: false });
     setLoginError('');
     setOtpError('');
     setOtpCode('');
+    setTgLoginError('');
+    setTgLoginOtp('');
     clearError();
+  };
+
+  const handleTgLoginInit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const phone = tgLoginPhone.trim();
+    if (!phone) { setTgLoginError('Telefon raqamingizni kiriting'); return; }
+    setTgLoginError('');
+    setTgLoginSending(true);
+    try {
+      const res = await telegramOTPLoginInit(tgLoginPhone);
+      flow.set({ tgLoginStep: 2, tgLoginToken: res.login_token, tgLoginBotLink: res.bot_link, tgLoginHasTelegram: res.has_telegram });
+    } catch (err: unknown) {
+      setTgLoginError(err instanceof Error ? err.message : 'Xatolik yuz berdi');
+    } finally {
+      setTgLoginSending(false);
+    }
+  };
+
+  const handleTgLoginVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (tgLoginOtp.length !== 6) { setTgLoginError('6 raqamli kodni kiriting'); return; }
+    setTgLoginVerifying(true);
+    setTgLoginError('');
+    try {
+      const data = await telegramOTPLoginVerify(tgLoginToken, tgLoginOtp);
+      useAuthStore.getState().setDjangoUser(data.user);
+      useAuthStore.getState().setRole(data.user.role as 'parent' | 'nanny' | 'admin');
+      onClose();
+    } catch (err: unknown) {
+      setTgLoginError(err instanceof Error ? err.message : 'Kod noto\'g\'ri');
+    } finally {
+      setTgLoginVerifying(false);
+    }
   };
 
   const startOtpCountdown = () => {
@@ -787,7 +828,7 @@ function AuthModal({ isOpen, onClose, onGoogleLogin, onTelegramLogin, onEmailLog
                         className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${loginMode === 'password' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                       >
                         <Lock className="w-3.5 h-3.5" />
-                        Parol bilan
+                        Parol
                       </button>
                       <button
                         type="button"
@@ -795,7 +836,17 @@ function AuthModal({ isOpen, onClose, onGoogleLogin, onTelegramLogin, onEmailLog
                         className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${loginMode === 'otp' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
                       >
                         <Mail className="w-3.5 h-3.5" />
-                        Email kod bilan
+                        Email OTP
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => switchLoginMode('telegram')}
+                        className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${loginMode === 'telegram' ? 'bg-white text-[#229ED9] shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                      >
+                        <svg className="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                          <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L7.16 13.26l-2.95-.924c-.64-.203-.658-.64.136-.954l11.57-4.46c.537-.194 1.006.131.978.299z"/>
+                        </svg>
+                        Telegram
                       </button>
                     </div>
 
@@ -938,6 +989,112 @@ function AuthModal({ isOpen, onClose, onGoogleLogin, onTelegramLogin, onEmailLog
                       </div>
                     )}
 
+                    {/* ── Telegram OTP bilan kirish ── */}
+                    {loginMode === 'telegram' && (
+                      <div className="space-y-4">
+                        {tgLoginStep === 1 && (
+                          <form onSubmit={handleTgLoginInit} className="space-y-3">
+                            <div className="p-3 bg-[#229ED9]/10 rounded-xl text-sm text-[#1a7aaa] font-medium flex items-start gap-2">
+                              <svg className="w-4 h-4 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L7.16 13.26l-2.95-.924c-.64-.203-.658-.64.136-.954l11.57-4.46c.537-.194 1.006.131.978.299z"/>
+                              </svg>
+                              Hisobingizga bog'liq Telegram profilingizga OTP yuboriladi
+                            </div>
+                            <div className="relative">
+                              <span className={iconWrap}><Phone className="w-4 h-4" /></span>
+                              <input
+                                type="tel"
+                                placeholder="+998 XX XXX XX XX"
+                                value={tgLoginPhone}
+                                onChange={e => flow.set({ tgLoginPhone: e.target.value })}
+                                className={`${inputCls} pl-10`}
+                                autoComplete="tel"
+                                autoFocus
+                              />
+                            </div>
+                            {tgLoginError && (
+                              <div className="flex items-start gap-2 p-3 bg-red-50 text-red-600 rounded-xl text-sm">
+                                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                                <span>{tgLoginError}</span>
+                              </div>
+                            )}
+                            <button
+                              type="submit"
+                              disabled={tgLoginSending || !tgLoginPhone}
+                              className="w-full bg-[#229ED9] hover:bg-[#1a8bbf] disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3.5 rounded-xl font-bold transition-colors flex items-center justify-center gap-2"
+                            >
+                              {tgLoginSending
+                                ? <span className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                : 'Telegram ga kod yuborish'}
+                            </button>
+                          </form>
+                        )}
+
+                        {tgLoginStep === 2 && (
+                          <form onSubmit={handleTgLoginVerify} className="space-y-3">
+                            {tgLoginHasTelegram ? (
+                              <div className="p-3 bg-green-50 border border-green-200 rounded-xl text-sm text-green-700 flex items-start gap-2">
+                                <svg className="w-4 h-4 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L7.16 13.26l-2.95-.924c-.64-.203-.658-.64.136-.954l11.57-4.46c.537-.194 1.006.131.978.299z"/>
+                                </svg>
+                                Telegram profilingizga kod yuborildi. Yoki botga o'ting:
+                              </div>
+                            ) : (
+                              <div className="p-3 bg-blue-50 border border-blue-200 rounded-xl text-sm text-blue-700 flex items-start gap-2">
+                                <svg className="w-4 h-4 mt-0.5 shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                                  <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L7.16 13.26l-2.95-.924c-.64-.203-.658-.64.136-.954l11.57-4.46c.537-.194 1.006.131.978.299z"/>
+                                </svg>
+                                Quyidagi tugma orqali botga o'ting va kodni oling:
+                              </div>
+                            )}
+                            <a
+                              href={tgLoginBotLink}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="flex items-center justify-center gap-3 w-full bg-[#229ED9] hover:bg-[#1a8bbf] text-white py-3.5 rounded-xl font-bold transition-colors"
+                            >
+                              <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L7.16 13.26l-2.95-.924c-.64-.203-.658-.64.136-.954l11.57-4.46c.537-.194 1.006.131.978.299z"/>
+                              </svg>
+                              @Enagamuzbot ga o'tish
+                            </a>
+                            <div className="relative">
+                              <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-200" /></div>
+                              <div className="relative flex justify-center text-xs text-slate-400 bg-white px-2">Botdan kelgan kodni kiriting</div>
+                            </div>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              maxLength={6}
+                              placeholder="_ _ _ _ _ _"
+                              value={tgLoginOtp}
+                              onChange={e => setTgLoginOtp(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                              className={`${inputCls} text-center text-2xl font-bold tracking-[0.5em] py-4`}
+                              autoFocus
+                            />
+                            {tgLoginError && (
+                              <div className="flex items-start gap-2 p-3 bg-red-50 text-red-600 rounded-xl text-sm">
+                                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                                <span>{tgLoginError}</span>
+                              </div>
+                            )}
+                            <button
+                              type="submit"
+                              disabled={tgLoginVerifying || tgLoginOtp.length !== 6}
+                              className="w-full bg-[#229ED9] hover:bg-[#1a8bbf] disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3.5 rounded-xl font-bold transition-colors flex items-center justify-center gap-2"
+                            >
+                              {tgLoginVerifying
+                                ? <span className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                                : 'Tasdiqlash'}
+                            </button>
+                            <button type="button" onClick={() => { flow.set({ tgLoginStep: 1 }); setTgLoginOtp(''); setTgLoginError(''); }} className="w-full text-sm text-slate-500 hover:text-slate-700">
+                              ← Telefon raqamni o'zgartirish
+                            </button>
+                          </form>
+                        )}
+                      </div>
+                    )}
+
                     {/* Divider */}
                     <div className="flex items-center gap-3 my-2">
                       <div className="flex-1 h-px bg-slate-200" />
@@ -1001,7 +1158,7 @@ function AuthModal({ isOpen, onClose, onGoogleLogin, onTelegramLogin, onEmailLog
                           <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
                             <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L7.16 13.26l-2.95-.924c-.64-.203-.658-.64.136-.954l11.57-4.46c.537-.194 1.006.131.978.299z"/>
                           </svg>
-                          @enagamuz ga o'tish
+                          @Enagamuzbot ga o'tish
                         </a>
 
                         <div className="relative">

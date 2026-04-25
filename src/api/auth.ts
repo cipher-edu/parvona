@@ -161,3 +161,24 @@ export async function verifyEmailOTP(
 export async function getMe() {
   return api.get('/api/auth/me/');
 }
+
+/**
+ * Telegram OTP login: emailni yuborib bot link olish.
+ */
+export async function telegramOTPLoginInit(
+  phone: string,
+): Promise<{ login_token: string; bot_link: string; has_telegram: boolean; message: string }> {
+  return api.publicPost('/api/auth/telegram/otp/init/', { phone });
+}
+
+/**
+ * Telegram OTP login: kodni tasdiqlash → JWT olish.
+ */
+export async function telegramOTPLoginVerify(
+  login_token: string,
+  otp: string,
+): Promise<AuthTokens> {
+  const data = await api.publicPost<AuthTokens>('/api/auth/telegram/otp/verify/', { login_token, otp });
+  tokenStorage.setTokens(data.access, data.refresh);
+  return data;
+}

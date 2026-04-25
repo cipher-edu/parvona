@@ -68,13 +68,21 @@ def _process_otp_token(reg_token: str, chat_id: int):
     return {'otp': otp, 'name': reg_data.get('name', ''), 'email': reg_data.get('email', '')}
 
 
+@sync_to_async
+def _get_login_otp(login_token: str):
+    from django.core.cache import cache
+    otp = cache.get(f'tg_login_otp:{login_token}')
+    uid = cache.get(f'tg_login_uid:{login_token}')
+    return otp, uid
+
+
 async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     tg_user = update.effective_user
     args = context.args  # deep link payload
 
     # ── Ro'yxatdan o'tish OTP oqimi ─────────────────────────────────────────
     if args and args[0].startswith('OTP_'):
-        reg_token = args[0][4:]  # 'OTP_' prefiksini olib tashlash
+        reg_token = args[0][4:]
         result = await _process_otp_token(reg_token, tg_user.id)
         if not result:
             await update.message.reply_text(
@@ -86,6 +94,26 @@ async def start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"👋 Salom, *{tg_user.first_name}*!\n\n"
             f"🔐 *Parvona* saytiga ro'yxatdan o'tish uchun tasdiqlash kodingiz:\n\n"
             f"```\n{result['otp']}\n```\n\n"
+            f"⏱ Kod *5 daqiqa* davomida amal qiladi.\n"
+            f"Bu kodni Parvona saytidagi maydoniga kiriting.",
+            parse_mode='Markdown'
+        )
+        return
+
+    # ── Kirish OTP oqimi ────────────────────────────────────────────────────
+    if args and args[0].startswith('LOGIN_'):
+        login_token = args[0][6:]
+        otp, uid = await _get_login_otp(login_token)
+        if not otp or not uid:
+            await update.message.reply_text(
+                "❌ Kirish so'rovi topilmadi yoki muddati o'tgan.\n\n"
+                "Parvona saytida qaytadan urinib ko'ring."
+            )
+            return
+        await update.message.reply_text(
+            f"👋 Salom, *{tg_user.first_name}*!\n\n"
+            f"🔑 *Parvona* saytiga kirish uchun tasdiqlash kodingiz:\n\n"
+            f"```\n{otp}\n```\n\n"
             f"⏱ Kod *5 daqiqa* davomida amal qiladi.\n"
             f"Bu kodni Parvona saytidagi maydoniga kiriting.",
             parse_mode='Markdown'

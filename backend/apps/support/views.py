@@ -58,6 +58,19 @@ class ConversationListCreateView(generics.ListCreateAPIView):
 
         subject = request.data.get('subject', 'Yordam so\'rovi')
         conv = SupportConversation.objects.create(user=request.user, subject=subject)
+
+        # Adminga Telegram bildirishnoma
+        try:
+            from apps.notifications.tasks import _tg_notify_admins
+            _tg_notify_admins(
+                '🆘 Yangi yordam so\'rovi',
+                f'👤 {request.user.name} ({request.user.email})\n'
+                f'📋 Mavzu: {subject}\n'
+                f'Adminpanelda ko\'rib chiqing.',
+            )
+        except Exception:
+            pass
+
         serializer = SupportConversationListSerializer(conv, context={'request': request})
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
@@ -129,8 +142,31 @@ class MessageSendView(APIView):
             conv.save(update_fields=['admin', 'updated_at'])
 
         message = SupportMessage.objects.create(conversation=conv, sender=user, text=text)
-        # updated_at yangilash
         SupportConversation.objects.filter(id=conv.id).update(updated_at=timezone.now())
+
+        # Xabar qabul qiluvchiga Telegram bildirishnoma
+        try:
+            from apps.notifications.tasks import _tg_notify, _tg_notify_admins
+            short_text = text[:150] + ('…' if len(text) > 150 else '')
+            if user.role == 'admin':
+                # Admin javob yozdi → foydalanuvchiga bildirish
+                _tg_notify(
+                    conv.user,
+                    '💬 Admindan javob keldi',
+                    f'📋 Mavzu: {conv.subject}\n'
+                    f'💬 "{short_text}"\n\n'
+                    f'Saytga o\'ting va javobni ko\'ring.',
+                )
+            else:
+                # Foydalanuvchi yozdi → adminga bildirish
+                _tg_notify_admins(
+                    '💬 Yordam xabari',
+                    f'👤 {user.name} ({user.email})\n'
+                    f'📋 {conv.subject}\n'
+                    f'💬 "{short_text}"',
+                )
+        except Exception:
+            pass
 
         return Response(SupportMessageSerializer(message).data, status=status.HTTP_201_CREATED)
 
