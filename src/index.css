@@ -1,0 +1,14 @@
+@import "tailwindcss";
+
+@layer base {
+  html { font-family: system-ui, -apple-system, sans-serif; font-size: 17px; }
+  body { @apply bg-slate-50 text-slate-900; }
+  * { @apply box-border; }
+  ::selection { @apply bg-purple-200 text-purple-900; }
+}
+
+@layer utilities {
+  .scrollbar-hide { scrollbar-width: none; -ms-overflow-style: none; }
+  .scrollbar-hide::-webkit-scrollbar { display: none; }
+  .glass { @apply bg-white/80 backdrop-blur-md; }
+}

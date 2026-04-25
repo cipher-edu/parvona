@@ -1,0 +1,195 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId}
+    // Fields:
+    //   - uid: string (required) - immutable
+    //   - role: string (required) - 'parent', 'nanny', 'admin'
+    //   - name: string (required)
+    //   - email: string (required)
+    //   - photoUrl: string (optional)
+    //   - phone: string (optional)
+    //   - createdAt: timestamp (required) - immutable
+    //   - updatedAt: timestamp (required)
+    //
+    // Collection: nannyProfiles
+    // Document ID: {profileId}
+    // Fields:
+    //   - userId: string (required) - immutable
+    //   - age: number (required)
+    //   - experience: string (required)
+    //   - hourlyRate: string (required)
+    //   - bio: string (required)
+    //   - skills: list of strings (required)
+    //   - locationName: string (required)
+    //   - coordinates: list of numbers (optional)
+    //   - rating: number (required)
+    //   - reviewsCount: number (required)
+    //   - isVerified: boolean (required)
+    //
+    // Collection: reviews
+    // Document ID: {reviewId}
+    // Fields:
+    //   - nannyId: string (required) - immutable
+    //   - parentId: string (required) - immutable
+    //   - parentName: string (required) - immutable
+    //   - rating: number (required) - immutable
+    //   - text: string (required) - immutable
+    //   - createdAt: timestamp (required) - immutable
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin';
+    }
+
+    function hasRequiredFields(fields) {
+      return request.resource.data.keys().hasAll(fields);
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    function uidUnchanged() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == request.auth.uid;
+    }
+
+    function uidNotModified() {
+      return !('uid' in request.resource.data) || request.resource.data.uid == resource.data.uid;
+    }
+
+    function areImmutableFieldsUnchanged(fields) {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny(fields);
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+    function isValidUser(data) {
+      return hasRequiredFields(['uid', 'role', 'name', 'email', 'createdAt', 'updatedAt']) &&
+             hasOnlyAllowedFields(['uid', 'role', 'name', 'email', 'photoUrl', 'phone', 'createdAt', 'updatedAt']) &&
+             data.uid is string && data.uid.size() > 0 && data.uid.size() < 100 &&
+             data.role in ['parent', 'nanny', 'admin'] &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             isValidEmail(data.email) &&
+             (!('photoUrl' in data) || (data.photoUrl is string && data.photoUrl.size() < 1000)) &&
+             (!('phone' in data) || (data.phone is string && data.phone.size() < 20)) &&
+             data.createdAt is timestamp &&
+             data.updatedAt is timestamp;
+    }
+
+    function isValidNannyProfile(data) {
+      return hasRequiredFields(['userId', 'age', 'experience', 'hourlyRate', 'bio', 'skills', 'locationName', 'rating', 'reviewsCount', 'isVerified']) &&
+             hasOnlyAllowedFields(['userId', 'age', 'experience', 'hourlyRate', 'bio', 'skills', 'locationName', 'coordinates', 'rating', 'reviewsCount', 'isVerified', 'badges']) &&
+             data.userId is string && data.userId.size() > 0 && data.userId.size() < 100 &&
+             data.age is number && data.age >= 18 && data.age <= 100 &&
+             data.experience is string && data.experience.size() > 0 && data.experience.size() < 50 &&
+             data.hourlyRate is string && data.hourlyRate.size() > 0 && data.hourlyRate.size() < 50 &&
+             data.bio is string && data.bio.size() > 0 && data.bio.size() < 2000 &&
+             data.skills is list && data.skills.size() <= 20 &&
+             data.locationName is string && data.locationName.size() > 0 && data.locationName.size() < 200 &&
+             (!('coordinates' in data) || (data.coordinates is list && data.coordinates.size() == 2)) &&
+             data.rating is number && data.rating >= 0 && data.rating <= 5 &&
+             data.reviewsCount is number && data.reviewsCount >= 0 &&
+             data.isVerified is bool &&
+             (!('badges' in data) || (data.badges is list && data.badges.size() <= 10));
+    }
+
+    function isValidReview(data) {
+      return hasRequiredFields(['nannyId', 'parentId', 'parentName', 'rating', 'text', 'createdAt']) &&
+             hasOnlyAllowedFields(['nannyId', 'parentId', 'parentName', 'rating', 'text', 'createdAt', 'badges']) &&
+             data.nannyId is string && data.nannyId.size() > 0 && data.nannyId.size() < 100 &&
+             data.parentId is string && data.parentId.size() > 0 && data.parentId.size() < 100 &&
+             data.parentName is string && data.parentName.size() > 0 && data.parentName.size() < 100 &&
+             data.rating is number && data.rating >= 1 && data.rating <= 5 &&
+             data.text is string && data.text.size() > 0 && data.text.size() < 1000 &&
+             data.createdAt is timestamp &&
+             (!('badges' in data) || (data.badges is list && data.badges.size() <= 5));
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+    
+    match /users/{userId} {
+      // Anyone can read a user profile (needed for displaying names/photos)
+      allow read: if isAuthenticated();
+      
+      // Users can create their own profile, but cannot assign themselves 'admin' role unless they are already an admin
+      allow create: if isAuthenticated() && 
+                    isOwner(userId) && 
+                    isValidUser(request.resource.data) && 
+                    uidUnchanged() &&
+                    (request.resource.data.role in ['parent', 'nanny'] || isAdmin());
+                    
+      // Users can update their own profile, but cannot change their uid, createdAt, or role (unless admin)
+      allow update: if isAuthenticated() && 
+                    isOwner(userId) && 
+                    isValidUser(request.resource.data) && 
+                    uidNotModified() &&
+                    areImmutableFieldsUnchanged(['uid', 'createdAt']) &&
+                    (request.resource.data.role == resource.data.role || isAdmin());
+                    
+      allow delete: if isAdmin();
+    }
+
+    match /nannyProfiles/{profileId} {
+      // Anyone can read nanny profiles
+      allow read: if true;
+      
+      // Only nannies can create their own profile
+      allow create: if isAuthenticated() && 
+                    isValidNannyProfile(request.resource.data) &&
+                    request.resource.data.userId == request.auth.uid &&
+                    get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'nanny';
+                    
+      // Nannies can update their own profile, but cannot change the userId, rating, or reviewsCount (these are updated via Cloud Functions or admins)
+      allow update: if isAuthenticated() && 
+                    isValidNannyProfile(request.resource.data) &&
+                    resource.data.userId == request.auth.uid &&
+                    request.resource.data.userId == resource.data.userId &&
+                    areImmutableFieldsUnchanged(['userId', 'rating', 'reviewsCount', 'isVerified']);
+                    
+      allow delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+    }
+
+    match /reviews/{reviewId} {
+      // Anyone can read reviews
+      allow read: if true;
+      
+      // Parents can create reviews for nannies
+      allow create: if isAuthenticated() && 
+                    isValidReview(request.resource.data) &&
+                    request.resource.data.parentId == request.auth.uid &&
+                    get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'parent';
+                    
+      // Reviews cannot be updated (or only by admin)
+      allow update: if isAdmin();
+      
+      // Reviews can be deleted by the author or admin
+      allow delete: if isAdmin() || (isAuthenticated() && resource.data.parentId == request.auth.uid);
+    }
+  }
+}

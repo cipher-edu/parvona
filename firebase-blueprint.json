@@ -1,0 +1,75 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "A registered user on the platform, either a parent or a nanny.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string", "description": "The Firebase Auth UID." },
+        "role": { "type": "string", "enum": ["parent", "nanny", "admin"], "description": "The role of the user." },
+        "name": { "type": "string", "description": "Full name of the user." },
+        "email": { "type": "string", "format": "email", "description": "Email address." },
+        "photoUrl": { "type": "string", "format": "uri", "description": "Profile picture URL." },
+        "phone": { "type": "string", "description": "Phone number." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp." },
+        "updatedAt": { "type": "string", "format": "date-time", "description": "Last update timestamp." }
+      },
+      "required": ["uid", "role", "name", "email", "createdAt", "updatedAt"]
+    },
+    "NannyProfile": {
+      "title": "Nanny Profile",
+      "description": "Detailed profile information for a nanny.",
+      "type": "object",
+      "properties": {
+        "userId": { "type": "string", "description": "Reference to the User document." },
+        "age": { "type": "number", "description": "Age of the nanny." },
+        "experience": { "type": "string", "description": "Years of experience." },
+        "hourlyRate": { "type": "string", "description": "Hourly rate." },
+        "bio": { "type": "string", "description": "Biography." },
+        "skills": { 
+          "type": "array", 
+          "items": { "type": "string" },
+          "description": "List of skills." 
+        },
+        "locationName": { "type": "string", "description": "Location name." },
+        "coordinates": { 
+          "type": "array", 
+          "items": { "type": "number" },
+          "description": "Latitude and longitude." 
+        },
+        "rating": { "type": "number", "description": "Average rating." },
+        "reviewsCount": { "type": "number", "description": "Number of reviews." },
+        "isVerified": { "type": "boolean", "description": "Whether the nanny is verified." }
+      },
+      "required": ["userId", "age", "experience", "hourlyRate", "bio", "skills", "locationName", "rating", "reviewsCount", "isVerified"]
+    },
+    "Review": {
+      "title": "Review",
+      "description": "A review left by a parent for a nanny.",
+      "type": "object",
+      "properties": {
+        "nannyId": { "type": "string", "description": "ID of the nanny being reviewed." },
+        "parentId": { "type": "string", "description": "ID of the parent leaving the review." },
+        "parentName": { "type": "string", "description": "Name of the parent." },
+        "rating": { "type": "number", "description": "Rating from 1 to 5." },
+        "text": { "type": "string", "description": "Review text." },
+        "createdAt": { "type": "string", "format": "date-time", "description": "Creation timestamp." }
+      },
+      "required": ["nannyId", "parentId", "parentName", "rating", "text", "createdAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Stores user profiles."
+    },
+    "/nannyProfiles/{profileId}": {
+      "schema": { "$ref": "#/entities/NannyProfile" },
+      "description": "Stores detailed nanny profiles."
+    },
+    "/reviews/{reviewId}": {
+      "schema": { "$ref": "#/entities/Review" },
+      "description": "Stores reviews for nannies."
+    }
+  }
+}

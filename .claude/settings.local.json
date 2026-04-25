@@ -1,0 +1,38 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(docker --version)",
+      "Bash(docker compose *)",
+      "Bash(docker-compose --version)",
+      "Bash(npm --version)",
+      "Bash(powershell.exe -Command \"Start-Process 'C:\\\\Program Files\\\\Docker\\\\Docker\\\\Docker Desktop.exe'\")",
+      "Bash(docker info *)",
+      "Bash(break)",
+      "Bash(python3 -c ' *)",
+      "Bash(npm run *)",
+      "Bash(echo \"Landing page PID: $!\")",
+      "Bash(echo \"Frontend PID: $!\")",
+      "Read(//tmp/**)",
+      "Bash(./node_modules/.bin/vite)",
+      "Bash(echo \"Landing PID: $!\")",
+      "Bash(npm install *)",
+      "Bash(npx vite *)",
+      "Bash(kill 1289)",
+      "Bash(pkill -f \"vite\")",
+      "PowerShell(netstat *)",
+      "Bash(echo \"PID: $!\")",
+      "Bash(curl *)",
+      "Bash(xargs ls *)",
+      "Bash(git add *)",
+      "Bash(git commit *)",
+      "Bash(git config *)",
+      "Bash(git push *)",
+      "Bash(sshpass *)",
+      "PowerShell(where.exe ssh; where.exe sshpass 2>$null; ssh -V 2>&1)",
+      "PowerShell(echo \"y\" | & \"C:\\\\Program Files\\\\PuTTY\\\\plink.exe\" -ssh -P 4590 -pw \"16172714\" rahim@195.158.20.27 \"ls /var/www/\" 2>&1)",
+      "Bash(mkdir -p /c/Temp)",
+      "Bash(tar -czf /c/Temp/parvona_update.tar.gz --exclude=.git --exclude=node_modules --exclude=frontend --exclude=__pycache__ '--exclude=*.pyc' --exclude=backend/staticfiles --exclude=backend/celerybeat-schedule '--exclude=*.zip' .)",
+      "Read(//c/Temp/**)"
+    ]
+  }
+}

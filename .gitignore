@@ -1,0 +1,26 @@
+node_modules/
+build/
+dist/
+coverage/
+.DS_Store
+*.log
+.env*
+!.env.example
+!backend/.env
+
+# Firebase credentials — hech qachon commitga qo'shilmasin
+firebase-applet-config.json
+firebase-service-account.json
+*-service-account.json
+
+Dockerfile.zip
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+
+# Static/media
+backend/staticfiles/
+backend/media/
