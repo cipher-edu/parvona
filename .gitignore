@@ -6,11 +6,10 @@ coverage/
 *.log
 .env*
 !.env.example
+!backend/.env
 
 # Firebase credentials — hech qachon commitga qo'shilmasin
 firebase-applet-config.json
 firebase-service-account.json
 *-service-account.json
 
-# Backend .env
-backend/.env
