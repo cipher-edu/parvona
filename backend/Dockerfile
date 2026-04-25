@@ -1,5 +1,7 @@
 FROM python:3.12-slim
 
+ARG ENVIRONMENT=development
+
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
@@ -12,8 +14,9 @@ RUN apt-get update && apt-get install -y \
     libpq-dev \
     && rm -rf /var/lib/apt/lists/*
 
-COPY requirements/base.txt requirements/base.txt
-RUN pip install -r requirements/base.txt
+COPY requirements/ requirements/
+RUN pip install -r requirements/base.txt && \
+    if [ "$ENVIRONMENT" = "production" ]; then pip install -r requirements/production.txt; fi
 
 COPY . .
 

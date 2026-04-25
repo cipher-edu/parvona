@@ -55,6 +55,8 @@ services:
   celery_worker:
     build:
       context: ./backend
+      args:
+        ENVIRONMENT: production
     restart: always
     command: ["celery", "-A", "config", "worker", "-l", "warning", "-c", "4"]
     env_file:
@@ -70,6 +72,8 @@ services:
   celery_beat:
     build:
       context: ./backend
+      args:
+        ENVIRONMENT: production
     restart: always
     command: ["celery", "-A", "config", "beat", "-l", "warning", "--scheduler", "django_celery_beat.schedulers:DatabaseScheduler"]
     env_file:
