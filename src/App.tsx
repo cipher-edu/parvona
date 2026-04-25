@@ -1,11 +1,15 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { motion, AnimatePresence } from 'motion/react';
 import { MapContainer, TileLayer, Circle, CircleMarker, Popup, useMap } from 'react-leaflet';
 import 'leaflet/dist/leaflet.css';
-import { auth, db, googleProvider, handleFirestoreError, OperationType } from './firebase';
-import { signInWithPopup, signOut, onAuthStateChanged, User } from 'firebase/auth';
-import { doc, getDoc, setDoc, serverTimestamp } from 'firebase/firestore';
-import Dashboard from './components/Dashboard';
+import { getNannies, getNannyReviews, formatHourlyRate, SKILL_LABELS } from './api/nannies';
+import { createBooking } from './api/bookings';
+import { getLatestReviews } from './api/reviews';
+import { sendEmailOTP, registerSendOTP, registerTelegramInit } from './api/auth';
+import { Nanny, Review } from './api/types';
+import { useAuthStore } from './store/useAuthStore';
+import { useAuthFlow, clearAuthFlow } from './hooks/useAuthFlow';
 import { 
   HeartHandshake, 
   Search, 
@@ -41,7 +45,23 @@ import {
   MessageSquareQuote,
   TrendingUp,
   UserPlus,
-  Calendar
+  Calendar,
+  Eye,
+  EyeOff,
+  Mail,
+  Lock,
+  User,
+  Phone,
+  SlidersHorizontal,
+  ChevronDown,
+  RotateCcw,
+  BadgeCheck,
+  Banknote,
+  ArrowUpDown,
+  ArrowUp,
+  ArrowDown,
+  Gift,
+  Crown,
 } from 'lucide-react';
 
 const MOCK_NANNIES = [
@@ -156,7 +176,7 @@ const MapResizer = () => {
   return null;
 };
 
-const InterviewVideoPlayer = ({ src, poster, title }: { src: string, poster: string, title?: string }) => {
+const InterviewVideoPlayer = ({ src, poster, title }: { src: string | null, poster: string, title?: string }) => {
   const videoRef = useRef<HTMLVideoElement>(null);
   const [isPlaying, setIsPlaying] = useState(false);
   const [volume, setVolume] = useState(1);
@@ -272,7 +292,7 @@ const InterviewVideoPlayer = ({ src, poster, title }: { src: string, poster: str
       
       <video
         ref={videoRef}
-        src={src}
+        src={src || undefined}
         poster={poster}
         className="w-full h-full object-cover cursor-pointer"
         onClick={togglePlay}
@@ -388,87 +408,1344 @@ const InterviewVideoPlayer = ({ src, poster, title }: { src: string, poster: str
   );
 };
 
+// ─── API nanny → display formatiga adapter ────────────────────────────────────
+type DisplayNanny = typeof MOCK_NANNIES[0] & { apiId?: string; nannyUserId?: string; isVerified?: boolean; isPro?: boolean };
+
+function nannyFromApi(n: Nanny): DisplayNanny {
+  const skillLabels = (n.skills as string[]).map(s => SKILL_LABELS[s] || s);
+  return {
+    id: n.id,
+    apiId: n.id,
+    nannyUserId: n.user.id,
+    name: n.user.name,
+    age: n.age,
+    experience: `${n.experience} yil`,
+    rating: parseFloat(n.rating),
+    reviews: n.reviews_count,
+    hourlyRate: formatHourlyRate(n.hourly_rate),
+    imageUrl: n.user.photo || `https://ui-avatars.com/api/?name=${encodeURIComponent(n.user.name)}&background=7c3aed&color=fff`,
+    videoUrl: n.video_url || null,
+    bio: n.bio || '',
+    skills: skillLabels,
+    coordinates: (n.latitude && n.longitude) ? [n.latitude, n.longitude] as [number, number] : null as unknown as [number, number],
+    locationName: n.location_name,
+    badges: [],
+    reviewsList: [],
+    isVerified: n.is_verified,
+    isPro: n.is_pro,
+  };
+}
+
+// ─── Google logo SVG ──────────────────────────────────────────────────────────
+const GoogleLogo = () => (
+  <svg className="w-5 h-5 shrink-0" viewBox="0 0 24 24">
+    <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
+    <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
+    <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
+    <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
+  </svg>
+);
+
+// ─── Auth Modal ───────────────────────────────────────────────────────────────
+// Telegram Login Widget — bot nomi .env VITE_TELEGRAM_BOT_NAME dan olinadi
+function TelegramLoginWidget({
+  onAuth,
+  disabled,
+}: {
+  onAuth: (data: Record<string, string | number>) => void;
+  disabled?: boolean;
+}) {
+  const containerRef = useRef<HTMLDivElement>(null);
+  const botName = (import.meta.env.VITE_TELEGRAM_BOT_NAME as string) || '';
+
+  useEffect(() => {
+    if (!botName || !containerRef.current) return;
+    const container = containerRef.current;
+
+    (window as Record<string, unknown>)['onTelegramAuth'] = (
+      user: Record<string, string | number>,
+    ) => { onAuth(user); };
+
+    const script = document.createElement('script');
+    script.async = true;
+    script.src   = 'https://telegram.org/js/telegram-widget.js?22';
+    script.setAttribute('data-telegram-login',  botName);
+    script.setAttribute('data-size',            'large');
+    script.setAttribute('data-onauth',          'onTelegramAuth(user)');
+    script.setAttribute('data-request-access',  'write');
+    container.appendChild(script);
+
+    return () => {
+      delete (window as Record<string, unknown>)['onTelegramAuth'];
+      if (script.parentNode === container) container.removeChild(script);
+    };
+  }, [botName, onAuth]);
+
+  if (!botName) return null;
+
+  return (
+    <div
+      ref={containerRef}
+      className={`flex justify-center ${disabled ? 'opacity-50 pointer-events-none' : ''}`}
+    />
+  );
+}
+
+interface AuthModalProps {
+  isOpen: boolean;
+  onClose: () => void;
+  onGoogleLogin: () => void;
+  onTelegramLogin: (data: Record<string, string | number>) => Promise<void>;
+  onEmailLogin: (email: string, password: string) => Promise<void>;
+  onEmailOTPLogin: (email: string, otp: string, role: 'parent' | 'nanny') => Promise<void>;
+  onRegisterComplete:         (email: string, otp: string) => Promise<void>;
+  onRegisterTelegramComplete: (reg_token: string, otp: string) => Promise<void>;
+  authLoading: boolean;
+  authError: string | null;
+  clearError: () => void;
+}
+
+function AuthModal({ isOpen, onClose, onGoogleLogin, onTelegramLogin, onEmailLogin, onEmailOTPLogin, onRegisterComplete, onRegisterTelegramComplete, authLoading, authError, clearError }: AuthModalProps) {
+  // Persistent state — sessionStorage orqali sahifa o'zgarsa ham saqlanadi
+  const flow = useAuthFlow();
+  const { tab, loginMode, otpStep, otpEmail, otpRole, regStep, regOtpMethod, regEmail, regTelegramToken, regTelegramBotLink } = flow;
+
+  const [showPw, setShowPw] = useState(false);
+  const [showPw2, setShowPw2] = useState(false);
+
+  // Login form state
+  const [loginEmail, setLoginEmail] = useState('');
+  const [loginPassword, setLoginPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+
+  // OTP login state (persistent emas — kodlar xavfsizlik uchun saqlanmaydi)
+  const [otpCode, setOtpCode] = useState('');
+  const [otpSending, setOtpSending] = useState(false);
+  const [otpVerifying, setOtpVerifying] = useState(false);
+  const [otpError, setOtpError] = useState('');
+  const [otpCountdown, setOtpCountdown] = useState(0);
+
+  // Register form state
+  const [regName, setRegName] = useState('');
+  const [regPhone, setRegPhone] = useState('');
+  const [regRole, setRegRole] = useState<'parent' | 'nanny'>('parent');
+  const [regPassword, setRegPassword] = useState('');
+  const [regPassword2, setRegPassword2] = useState('');
+  const [regRefCode, setRegRefCode] = useState(() => new URLSearchParams(window.location.search).get('ref') ?? '');
+  const [regError, setRegError] = useState('');
+
+  // Register OTP step state (persistent emas)
+  const [regOtpCode, setRegOtpCode] = useState('');
+  const [regOtpCountdown, setRegOtpCountdown] = useState(0);
+  const [regOtpSending, setRegOtpSending] = useState(false);
+  const [regOtpVerifying, setRegOtpVerifying] = useState(false);
+  // Telegram OTP state (persistent emas)
+  const [regTelegramOtpCode, setRegTelegramOtpCode] = useState('');
+  const [regTelegramVerifying, setRegTelegramVerifying] = useState(false);
+
+  // Modal yopilganda faqat kirish kodlari va xatolarni tozalash
+  // (flow holati — tab, regStep, regTelegramToken — sessionStorage da saqlanadi)
+  React.useEffect(() => {
+    if (!isOpen) {
+      setOtpCode('');
+      setOtpError('');
+      setOtpCountdown(0);
+      setRegOtpCode('');
+      setRegOtpCountdown(0);
+      setRegTelegramOtpCode('');
+    }
+  }, [isOpen]);
+
+  const switchTab = (t: 'login' | 'register') => {
+    flow.set({ tab: t });
+    setLoginError('');
+    setRegError('');
+    setRegOtpCode('');
+    setRegTelegramOtpCode('');
+    clearError();
+  };
+
+  const handleEmailLogin = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setLoginError('');
+    if (!loginEmail || !loginPassword) { setLoginError('Email va parolni kiriting'); return; }
+    try {
+      await onEmailLogin(loginEmail, loginPassword);
+    } catch (err: unknown) {
+      setLoginError(err instanceof Error ? err.message : 'Kirish xatosi');
+    }
+  };
+
+  const switchLoginMode = (mode: 'password' | 'otp') => {
+    flow.set({ loginMode: mode, otpStep: 1 });
+    setLoginError('');
+    setOtpError('');
+    setOtpCode('');
+    clearError();
+  };
+
+  const startOtpCountdown = () => {
+    setOtpCountdown(60);
+    const id = setInterval(() => {
+      setOtpCountdown(c => {
+        if (c <= 1) { clearInterval(id); return 0; }
+        return c - 1;
+      });
+    }, 1000);
+  };
+
+  const handleSendOTP = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setOtpError('');
+    if (!otpEmail) { setOtpError('Email manzilni kiriting'); return; }
+    setOtpSending(true);
+    try {
+      await sendEmailOTP(otpEmail);
+      flow.set({ otpStep: 2 });
+      startOtpCountdown();
+    } catch (err: unknown) {
+      setOtpError(err instanceof Error ? err.message : 'Kod yuborishda xatolik');
+    } finally {
+      setOtpSending(false);
+    }
+  };
+
+  const handleVerifyOTP = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setOtpError('');
+    if (otpCode.length !== 6) { setOtpError('6 raqamli kodni kiriting'); return; }
+    setOtpVerifying(true);
+    try {
+      await onEmailOTPLogin(otpEmail, otpCode, otpRole);
+    } catch (err: unknown) {
+      setOtpError(err instanceof Error ? err.message : 'Noto\'g\'ri kod');
+    } finally {
+      setOtpVerifying(false);
+    }
+  };
+
+  const handleResendOTP = async () => {
+    if (otpCountdown > 0) return;
+    setOtpError('');
+    setOtpSending(true);
+    try {
+      await sendEmailOTP(otpEmail);
+      startOtpCountdown();
+      setOtpCode('');
+    } catch (err: unknown) {
+      setOtpError(err instanceof Error ? err.message : 'Kod qayta yuborishda xatolik');
+    } finally {
+      setOtpSending(false);
+    }
+  };
+
+  const startRegOtpCountdown = () => {
+    setRegOtpCountdown(60);
+    const id = setInterval(() => {
+      setRegOtpCountdown(c => {
+        if (c <= 1) { clearInterval(id); return 0; }
+        return c - 1;
+      });
+    }, 1000);
+  };
+
+  const handleRegister = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegError('');
+    if (!regName.trim()) { setRegError('Ism-sharifingizni kiriting'); return; }
+    if (!regEmail) { setRegError('Email manzilni kiriting'); return; }
+    if (regPassword.length < 8) { setRegError('Parol kamida 8 ta belgidan iborat bo\'lishi kerak'); return; }
+    if (regPassword !== regPassword2) { setRegError('Parollar mos kelmadi'); return; }
+    setRegOtpSending(true);
+    const payload = { email: regEmail, name: regName, phone: regPhone || undefined, role: regRole, password: regPassword, password2: regPassword2, ref_code: regRefCode || undefined };
+    try {
+      if (regOtpMethod === 'telegram') {
+        const result = await registerTelegramInit(payload);
+        flow.set({ regTelegramToken: result.reg_token, regTelegramBotLink: result.bot_link, regStep: 'telegram-otp' });
+      } else {
+        await registerSendOTP(payload);
+        flow.set({ regStep: 'otp' });
+        startRegOtpCountdown();
+      }
+    } catch (err: unknown) {
+      setRegError(err instanceof Error ? err.message : 'Ro\'yxatdan o\'tishda xato');
+    } finally {
+      setRegOtpSending(false);
+    }
+  };
+
+  const handleRegisterTelegramVerify = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegError('');
+    if (regTelegramOtpCode.length !== 6) { setRegError('6 raqamli kodni kiriting'); return; }
+    setRegTelegramVerifying(true);
+    try {
+      await onRegisterTelegramComplete(regTelegramToken, regTelegramOtpCode);
+    } catch (err: unknown) {
+      setRegError(err instanceof Error ? err.message : 'Noto\'g\'ri kod');
+    } finally {
+      setRegTelegramVerifying(false);
+    }
+  };
+
+  const handleRegisterVerifyOTP = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setRegError('');
+    if (regOtpCode.length !== 6) { setRegError('6 raqamli kodni kiriting'); return; }
+    setRegOtpVerifying(true);
+    try {
+      await onRegisterComplete(regEmail, regOtpCode);
+    } catch (err: unknown) {
+      setRegError(err instanceof Error ? err.message : 'Noto\'g\'ri kod');
+    } finally {
+      setRegOtpVerifying(false);
+    }
+  };
+
+  const handleRegisterResendOTP = async () => {
+    if (regOtpCountdown > 0) return;
+    setRegError('');
+    setRegOtpSending(true);
+    try {
+      await registerSendOTP({ email: regEmail, name: regName, phone: regPhone || undefined, role: regRole, password: regPassword, password2: regPassword2, ref_code: regRefCode || undefined });
+      startRegOtpCountdown();
+      setRegOtpCode('');
+    } catch (err: unknown) {
+      setRegError(err instanceof Error ? err.message : 'Kod qayta yuborishda xatolik');
+    } finally {
+      setRegOtpSending(false);
+    }
+  };
+
+  const inputCls = 'w-full border border-slate-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 focus:border-transparent transition-all bg-slate-50 focus:bg-white';
+  const iconWrap = 'absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400 pointer-events-none';
+
+  return (
+    <AnimatePresence>
+      {isOpen && (
+        <motion.div
+          initial={{ opacity: 0 }}
+          animate={{ opacity: 1 }}
+          exit={{ opacity: 0 }}
+          className="fixed inset-0 z-[80] bg-slate-900/60 backdrop-blur-sm flex items-center justify-center p-4"
+          onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+        >
+          <motion.div
+            initial={{ scale: 0.95, opacity: 0, y: 16 }}
+            animate={{ scale: 1, opacity: 1, y: 0 }}
+            exit={{ scale: 0.95, opacity: 0, y: 16 }}
+            transition={{ type: 'spring', damping: 28, stiffness: 300 }}
+            className="bg-white rounded-3xl w-full max-w-md shadow-2xl overflow-hidden"
+          >
+            {/* Header */}
+            <div className="relative bg-gradient-to-br from-purple-600 to-purple-800 px-8 pt-8 pb-6">
+              <button onClick={onClose} className="absolute top-4 right-4 w-8 h-8 flex items-center justify-center rounded-full bg-white/20 hover:bg-white/30 text-white transition-colors">
+                <X className="w-4 h-4" />
+              </button>
+              <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-4">
+                <HeartHandshake className="w-7 h-7 text-white" />
+              </div>
+              <h2 className="text-2xl font-bold text-white">
+                {tab === 'login' ? 'Xush kelibsiz!' : 'Ro\'yxatdan o\'tish'}
+              </h2>
+              <p className="text-purple-200 text-sm mt-1">
+                {tab === 'login' ? 'Hisobingizga kiring' : 'Parvonaga qo\'shiling'}
+              </p>
+
+              {/* Tab selector */}
+              <div className="flex gap-1 mt-5 bg-white/10 p-1 rounded-xl">
+                {(['login', 'register'] as const).map(t => (
+                  <button
+                    key={t}
+                    onClick={() => switchTab(t)}
+                    className={`flex-1 py-2 rounded-lg text-sm font-semibold transition-all ${tab === t ? 'bg-white text-purple-700 shadow-sm' : 'text-white/80 hover:text-white'}`}
+                  >
+                    {t === 'login' ? 'Kirish' : 'Ro\'yxatdan o\'tish'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Body */}
+            <div className="px-8 py-6 max-h-[70vh] overflow-y-auto">
+              <AnimatePresence mode="wait">
+                {/* ── LOGIN TAB ── */}
+                {tab === 'login' && (
+                  <motion.div
+                    key="login"
+                    initial={{ opacity: 0, x: -16 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: -16 }}
+                    transition={{ duration: 0.18 }}
+                    className="space-y-4"
+                  >
+                    {/* Kirish usuli toggle */}
+                    <div className="flex gap-1 bg-slate-100 p-1 rounded-xl">
+                      <button
+                        type="button"
+                        onClick={() => switchLoginMode('password')}
+                        className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${loginMode === 'password' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                      >
+                        <Lock className="w-3.5 h-3.5" />
+                        Parol bilan
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => switchLoginMode('otp')}
+                        className={`flex-1 py-2 rounded-lg text-xs font-semibold transition-all flex items-center justify-center gap-1.5 ${loginMode === 'otp' ? 'bg-white text-purple-700 shadow-sm' : 'text-slate-500 hover:text-slate-700'}`}
+                      >
+                        <Mail className="w-3.5 h-3.5" />
+                        Email kod bilan
+                      </button>
+                    </div>
+
+                    {/* ── Parol bilan kirish ── */}
+                    {loginMode === 'password' && (
+                      <form onSubmit={handleEmailLogin} className="space-y-4">
+                        <div className="relative">
+                          <span className={iconWrap}><Mail className="w-4 h-4" /></span>
+                          <input
+                            type="email"
+                            placeholder="Email manzilingiz"
+                            value={loginEmail}
+                            onChange={e => setLoginEmail(e.target.value)}
+                            className={`${inputCls} pl-10`}
+                            autoComplete="email"
+                          />
+                        </div>
+                        <div className="relative">
+                          <span className={iconWrap}><Lock className="w-4 h-4" /></span>
+                          <input
+                            type={showPw ? 'text' : 'password'}
+                            placeholder="Parolingiz"
+                            value={loginPassword}
+                            onChange={e => setLoginPassword(e.target.value)}
+                            className={`${inputCls} pl-10 pr-10`}
+                            autoComplete="current-password"
+                          />
+                          <button type="button" onClick={() => setShowPw(p => !p)} className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                            {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
+                        {(loginError || authError) && (
+                          <div className="flex items-start gap-2 p-3 bg-red-50 text-red-600 rounded-xl text-sm">
+                            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                            <span>{loginError || authError}</span>
+                          </div>
+                        )}
+                        <button
+                          type="submit"
+                          disabled={authLoading}
+                          className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3.5 rounded-xl font-bold transition-colors flex items-center justify-center gap-2"
+                        >
+                          {authLoading ? <span className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" /> : 'Kirish'}
+                        </button>
+                      </form>
+                    )}
+
+                    {/* ── Email OTP bilan kirish ── */}
+                    {loginMode === 'otp' && (
+                      <div className="space-y-4">
+                        {/* Rol tanlash */}
+                        <div className="grid grid-cols-2 gap-2">
+                          {(['parent', 'nanny'] as const).map(r => (
+                            <button
+                              key={r}
+                              type="button"
+                              onClick={() => flow.set({ otpRole: r })}
+                              className={`py-2.5 rounded-xl text-sm font-semibold border-2 transition-all ${otpRole === r ? 'border-purple-500 bg-purple-50 text-purple-700' : 'border-slate-200 text-slate-500 hover:border-slate-300'}`}
+                            >
+                              {r === 'parent' ? '👨‍👩‍👧 Ota-ona' : '👩‍🍼 Enaga'}
+                            </button>
+                          ))}
+                        </div>
+
+                        {otpStep === 1 && (
+                          <form onSubmit={handleSendOTP} className="space-y-3">
+                            <div className="relative">
+                              <span className={iconWrap}><Mail className="w-4 h-4" /></span>
+                              <input
+                                type="email"
+                                placeholder="Email manzilingiz"
+                                value={otpEmail}
+                                onChange={e => flow.set({ otpEmail: e.target.value })}
+                                className={`${inputCls} pl-10`}
+                                autoComplete="email"
+                              />
+                            </div>
+                            {otpError && (
+                              <div className="flex items-start gap-2 p-3 bg-red-50 text-red-600 rounded-xl text-sm">
+                                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                                <span>{otpError}</span>
+                              </div>
+                            )}
+                            <button
+                              type="submit"
+                              disabled={otpSending}
+                              className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3.5 rounded-xl font-bold transition-colors flex items-center justify-center gap-2"
+                            >
+                              {otpSending ? <span className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" /> : 'Kod yuborish'}
+                            </button>
+                          </form>
+                        )}
+
+                        {otpStep === 2 && (
+                          <form onSubmit={handleVerifyOTP} className="space-y-3">
+                            <div className="text-center p-3 bg-purple-50 rounded-xl text-sm text-purple-700 font-medium">
+                              <Mail className="w-4 h-4 inline mr-1.5 -mt-0.5" />
+                              <span className="font-bold">{otpEmail}</span> ga 6 raqamli kod yuborildi
+                            </div>
+                            <input
+                              type="text"
+                              inputMode="numeric"
+                              pattern="[0-9]{6}"
+                              maxLength={6}
+                              placeholder="_ _ _ _ _ _"
+                              value={otpCode}
+                              onChange={e => setOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                              className={`${inputCls} text-center text-2xl font-bold tracking-[0.5em] py-4`}
+                              autoComplete="one-time-code"
+                              autoFocus
+                            />
+                            {otpError && (
+                              <div className="flex items-start gap-2 p-3 bg-red-50 text-red-600 rounded-xl text-sm">
+                                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                                <span>{otpError}</span>
+                              </div>
+                            )}
+                            <button
+                              type="submit"
+                              disabled={otpVerifying || otpCode.length !== 6}
+                              className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3.5 rounded-xl font-bold transition-colors flex items-center justify-center gap-2"
+                            >
+                              {otpVerifying ? <span className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" /> : 'Tasdiqlash'}
+                            </button>
+                            <div className="flex items-center justify-between text-sm">
+                              <button type="button" onClick={() => { flow.set({ otpStep: 1 }); setOtpCode(''); setOtpError(''); }} className="text-slate-500 hover:text-slate-700">
+                                ← Email o'zgartirish
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleResendOTP}
+                                disabled={otpCountdown > 0 || otpSending}
+                                className="text-purple-600 font-semibold hover:underline disabled:text-slate-400 disabled:no-underline"
+                              >
+                                {otpCountdown > 0 ? `Qayta yuborish (${otpCountdown}s)` : 'Qayta yuborish'}
+                              </button>
+                            </div>
+                          </form>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Divider */}
+                    <div className="flex items-center gap-3 my-2">
+                      <div className="flex-1 h-px bg-slate-200" />
+                      <span className="text-xs text-slate-400 font-medium">yoki</span>
+                      <div className="flex-1 h-px bg-slate-200" />
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={onGoogleLogin}
+                      disabled={authLoading}
+                      className="w-full bg-white border-2 border-slate-200 hover:border-purple-300 hover:bg-purple-50 text-slate-700 py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-3 disabled:opacity-50"
+                    >
+                      <GoogleLogo />
+                      Google orqali kirish
+                    </button>
+
+                    {/* Telegram Login Widget */}
+                    <TelegramLoginWidget
+                      onAuth={onTelegramLogin}
+                      disabled={authLoading}
+                    />
+
+                    <p className="text-center text-sm text-slate-500">
+                      Hisobingiz yo'qmi?{' '}
+                      <button type="button" onClick={() => switchTab('register')} className="text-purple-600 font-semibold hover:underline">
+                        Ro'yxatdan o'ting
+                      </button>
+                    </p>
+                  </motion.div>
+                )}
+
+                {/* ── REGISTER TAB ── */}
+                {tab === 'register' && (
+                  <motion.div
+                    key="register"
+                    initial={{ opacity: 0, x: 16 }}
+                    animate={{ opacity: 1, x: 0 }}
+                    exit={{ opacity: 0, x: 16 }}
+                    transition={{ duration: 0.18 }}
+                  >
+                    {/* ── Telegram OTP bosqichi ── */}
+                    {regStep === 'telegram-otp' && (
+                      <form onSubmit={handleRegisterTelegramVerify} className="space-y-4">
+                        <div className="text-center p-4 bg-blue-50 rounded-2xl">
+                          <div className="w-12 h-12 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                            <svg className="w-6 h-6 text-blue-500" viewBox="0 0 24 24" fill="currentColor">
+                              <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L7.16 13.26l-2.95-.924c-.64-.203-.658-.64.136-.954l11.57-4.46c.537-.194 1.006.131.978.299z"/>
+                            </svg>
+                          </div>
+                          <p className="text-sm font-semibold text-slate-700">Telegram orqali tasdiqlash</p>
+                          <p className="text-xs text-slate-500 mt-1">Quyidagi tugma orqali botga o'ting va OTP kodni oling</p>
+                        </div>
+
+                        <a
+                          href={regTelegramBotLink}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="flex items-center justify-center gap-3 w-full bg-[#229ED9] hover:bg-[#1a8bbf] text-white py-3.5 rounded-xl font-bold transition-colors"
+                        >
+                          <svg className="w-5 h-5" viewBox="0 0 24 24" fill="currentColor">
+                            <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L7.16 13.26l-2.95-.924c-.64-.203-.658-.64.136-.954l11.57-4.46c.537-.194 1.006.131.978.299z"/>
+                          </svg>
+                          @enagamuz ga o'tish
+                        </a>
+
+                        <div className="relative">
+                          <div className="absolute inset-0 flex items-center"><div className="w-full border-t border-slate-200" /></div>
+                          <div className="relative flex justify-center text-xs text-slate-400 bg-white px-2">Botdan kelgan kodni kiriting</div>
+                        </div>
+
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          pattern="[0-9]{6}"
+                          maxLength={6}
+                          placeholder="_ _ _ _ _ _"
+                          value={regTelegramOtpCode}
+                          onChange={e => setRegTelegramOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          className={`${inputCls} text-center text-2xl font-bold tracking-[0.5em] py-4`}
+                          autoComplete="one-time-code"
+                        />
+
+                        {(regError || authError) && (
+                          <div className="flex items-start gap-2 p-3 bg-red-50 text-red-600 rounded-xl text-sm">
+                            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                            <span>{regError || authError}</span>
+                          </div>
+                        )}
+
+                        <button
+                          type="submit"
+                          disabled={regTelegramVerifying || regTelegramOtpCode.length !== 6}
+                          className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3.5 rounded-xl font-bold transition-colors flex items-center justify-center gap-2"
+                        >
+                          {regTelegramVerifying
+                            ? <span className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                            : <><CheckCircle2 className="w-4 h-4" /> Tasdiqlash</>
+                          }
+                        </button>
+
+                        <button
+                          type="button"
+                          onClick={() => { flow.set({ regStep: 'form', regTelegramToken: '', regTelegramBotLink: '' }); setRegTelegramOtpCode(''); setRegError(''); clearError(); }}
+                          className="w-full text-sm text-slate-500 hover:text-slate-700 py-1"
+                        >
+                          ← Orqaga
+                        </button>
+                      </form>
+                    )}
+
+                    {/* ── Email OTP tasdiqlash bosqichi ── */}
+                    {regStep === 'otp' && (
+                      <form onSubmit={handleRegisterVerifyOTP} className="space-y-4">
+                        <div className="text-center p-4 bg-purple-50 rounded-2xl">
+                          <div className="w-12 h-12 bg-purple-100 rounded-full flex items-center justify-center mx-auto mb-3">
+                            <Mail className="w-6 h-6 text-purple-600" />
+                          </div>
+                          <p className="text-sm font-semibold text-slate-700">Emailingizni tasdiqlang</p>
+                          <p className="text-xs text-slate-500 mt-1">
+                            <span className="font-bold text-purple-700">{regEmail}</span> manziliga 6 raqamli kod yuborildi
+                          </p>
+                        </div>
+
+                        <input
+                          type="text"
+                          inputMode="numeric"
+                          pattern="[0-9]{6}"
+                          maxLength={6}
+                          placeholder="_ _ _ _ _ _"
+                          value={regOtpCode}
+                          onChange={e => setRegOtpCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+                          className={`${inputCls} text-center text-2xl font-bold tracking-[0.5em] py-4`}
+                          autoComplete="one-time-code"
+                          autoFocus
+                        />
+
+                        {(regError || authError) && (
+                          <div className="flex items-start gap-2 p-3 bg-red-50 text-red-600 rounded-xl text-sm">
+                            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                            <span>{regError || authError}</span>
+                          </div>
+                        )}
+
+                        <button
+                          type="submit"
+                          disabled={regOtpVerifying || regOtpCode.length !== 6}
+                          className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3.5 rounded-xl font-bold transition-colors flex items-center justify-center gap-2"
+                        >
+                          {regOtpVerifying
+                            ? <span className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                            : <><CheckCircle2 className="w-4 h-4" /> Emailni tasdiqlash</>
+                          }
+                        </button>
+
+                        <div className="flex items-center justify-between text-sm">
+                          <button
+                            type="button"
+                            onClick={() => { flow.set({ regStep: 'form' }); setRegOtpCode(''); setRegError(''); clearError(); }}
+                            className="text-slate-500 hover:text-slate-700"
+                          >
+                            ← Orqaga
+                          </button>
+                          <button
+                            type="button"
+                            onClick={handleRegisterResendOTP}
+                            disabled={regOtpCountdown > 0 || regOtpSending}
+                            className="text-purple-600 font-semibold hover:underline disabled:text-slate-400 disabled:no-underline"
+                          >
+                            {regOtpSending
+                              ? 'Yuborilmoqda...'
+                              : regOtpCountdown > 0
+                                ? `Qayta yuborish (${regOtpCountdown}s)`
+                                : 'Qayta yuborish'}
+                          </button>
+                        </div>
+                      </form>
+                    )}
+
+                    {/* ── Ro'yxatdan o'tish formasi ── */}
+                    {regStep === 'form' && (
+                      <form onSubmit={handleRegister} className="space-y-4">
+                        {/* Role selector */}
+                        <div>
+                          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Siz kim sifatida ro'yxatdan o'tyapsiz?</p>
+                          <div className="grid grid-cols-2 gap-3">
+                            {([
+                              { v: 'parent', emoji: '👨‍👩‍👧‍👦', label: 'Ota-ona', desc: 'Enaga izlayman' },
+                              { v: 'nanny',  emoji: '👩‍⚕️',       label: 'Enaga',   desc: 'Ish izlayman'  },
+                            ] as const).map(opt => (
+                              <button
+                                key={opt.v}
+                                type="button"
+                                onClick={() => setRegRole(opt.v)}
+                                className={`p-3 rounded-2xl border-2 text-left transition-all ${regRole === opt.v ? 'border-purple-500 bg-purple-50' : 'border-slate-200 hover:border-slate-300'}`}
+                              >
+                                <div className="text-xl mb-1">{opt.emoji}</div>
+                                <p className="text-sm font-bold text-slate-900">{opt.label}</p>
+                                <p className="text-xs text-slate-500">{opt.desc}</p>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Name */}
+                        <div className="relative">
+                          <span className={iconWrap}><User className="w-4 h-4" /></span>
+                          <input
+                            type="text"
+                            placeholder="To'liq ism-sharifingiz"
+                            value={regName}
+                            onChange={e => setRegName(e.target.value)}
+                            className={`${inputCls} pl-10`}
+                            autoComplete="name"
+                          />
+                        </div>
+
+                        {/* Email */}
+                        <div className="relative">
+                          <span className={iconWrap}><Mail className="w-4 h-4" /></span>
+                          <input
+                            type="email"
+                            placeholder="Email manzilingiz"
+                            value={regEmail}
+                            onChange={e => flow.set({ regEmail: e.target.value })}
+                            className={`${inputCls} pl-10`}
+                            autoComplete="email"
+                          />
+                        </div>
+
+                        {/* Phone (optional) */}
+                        <div className="relative">
+                          <span className={iconWrap}><Phone className="w-4 h-4" /></span>
+                          <input
+                            type="tel"
+                            placeholder="Telefon raqam (ixtiyoriy)"
+                            value={regPhone}
+                            onChange={e => setRegPhone(e.target.value)}
+                            className={`${inputCls} pl-10`}
+                            autoComplete="tel"
+                          />
+                        </div>
+
+                        {/* Password */}
+                        <div className="relative">
+                          <span className={iconWrap}><Lock className="w-4 h-4" /></span>
+                          <input
+                            type={showPw ? 'text' : 'password'}
+                            placeholder="Parol (kamida 8 belgi)"
+                            value={regPassword}
+                            onChange={e => setRegPassword(e.target.value)}
+                            className={`${inputCls} pl-10 pr-10`}
+                            autoComplete="new-password"
+                          />
+                          <button type="button" onClick={() => setShowPw(p => !p)} className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                            {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
+
+                        {/* Confirm password */}
+                        <div className="relative">
+                          <span className={iconWrap}><Lock className="w-4 h-4" /></span>
+                          <input
+                            type={showPw2 ? 'text' : 'password'}
+                            placeholder="Parolni tasdiqlang"
+                            value={regPassword2}
+                            onChange={e => setRegPassword2(e.target.value)}
+                            className={`${inputCls} pl-10 pr-10`}
+                            autoComplete="new-password"
+                          />
+                          <button type="button" onClick={() => setShowPw2(p => !p)} className="absolute right-3.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600">
+                            {showPw2 ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                          </button>
+                        </div>
+
+                        {/* Referral code (optional) */}
+                        <div className="relative">
+                          <span className={iconWrap}><Gift className="w-4 h-4" /></span>
+                          <input
+                            type="text"
+                            placeholder="Referal kod (ixtiyoriy)"
+                            value={regRefCode}
+                            onChange={e => setRegRefCode(e.target.value.toUpperCase())}
+                            className={`${inputCls} pl-10`}
+                            maxLength={12}
+                          />
+                        </div>
+
+                        {/* OTP usul tanlash */}
+                        <div>
+                          <p className="text-xs font-semibold text-slate-500 uppercase tracking-wider mb-2">Tasdiqlash usuli</p>
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              type="button"
+                              onClick={() => flow.set({ regOtpMethod: 'email' })}
+                              className={`py-2.5 rounded-xl text-sm font-semibold border-2 transition-all flex items-center justify-center gap-2 ${regOtpMethod === 'email' ? 'border-purple-500 bg-purple-50 text-purple-700' : 'border-slate-200 text-slate-500 hover:border-slate-300'}`}
+                            >
+                              <Mail className="w-4 h-4" /> Email OTP
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => flow.set({ regOtpMethod: 'telegram' })}
+                              className={`py-2.5 rounded-xl text-sm font-semibold border-2 transition-all flex items-center justify-center gap-2 ${regOtpMethod === 'telegram' ? 'border-blue-500 bg-blue-50 text-blue-700' : 'border-slate-200 text-slate-500 hover:border-slate-300'}`}
+                            >
+                              <svg className="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                                <path d="M12 0C5.373 0 0 5.373 0 12s5.373 12 12 12 12-5.373 12-12S18.627 0 12 0zm5.894 8.221-1.97 9.28c-.145.658-.537.818-1.084.508l-3-2.21-1.447 1.394c-.16.16-.295.295-.605.295l.213-3.053 5.56-5.023c.242-.213-.054-.333-.373-.12L7.16 13.26l-2.95-.924c-.64-.203-.658-.64.136-.954l11.57-4.46c.537-.194 1.006.131.978.299z"/>
+                              </svg>
+                              Telegram OTP
+                            </button>
+                          </div>
+                        </div>
+
+                        {/* Password strength indicator */}
+                        {regPassword.length > 0 && (
+                          <div className="space-y-1">
+                            <div className="flex gap-1">
+                              {[1,2,3,4].map(i => (
+                                <div key={i} className={`h-1 flex-1 rounded-full transition-colors ${
+                                  regPassword.length >= i * 3
+                                    ? i <= 1 ? 'bg-red-400' : i <= 2 ? 'bg-amber-400' : i <= 3 ? 'bg-blue-400' : 'bg-green-500'
+                                    : 'bg-slate-200'
+                                }`} />
+                              ))}
+                            </div>
+                            <p className="text-xs text-slate-400">
+                              {regPassword.length < 4 ? 'Juda qisqa' : regPassword.length < 7 ? 'O\'rtacha' : regPassword.length < 10 ? 'Yaxshi' : 'Kuchli parol'}
+                            </p>
+                          </div>
+                        )}
+
+                        {(regError || authError) && (
+                          <div className="flex items-start gap-2 p-3 bg-red-50 text-red-600 rounded-xl text-sm">
+                            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                            <span>{regError || authError}</span>
+                          </div>
+                        )}
+
+                        <button
+                          type="submit"
+                          disabled={regOtpSending}
+                          className="w-full bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3.5 rounded-xl font-bold transition-colors flex items-center justify-center gap-2"
+                        >
+                          {regOtpSending ? (
+                            <span className="w-5 h-5 border-2 border-white/40 border-t-white rounded-full animate-spin" />
+                          ) : (
+                            <><UserPlus className="w-4 h-4" /> Davom etish</>
+                          )}
+                        </button>
+
+                        {/* Divider */}
+                        <div className="flex items-center gap-3 my-2">
+                          <div className="flex-1 h-px bg-slate-200" />
+                          <span className="text-xs text-slate-400 font-medium">yoki</span>
+                          <div className="flex-1 h-px bg-slate-200" />
+                        </div>
+
+                        <button
+                          type="button"
+                          onClick={onGoogleLogin}
+                          disabled={regOtpSending}
+                          className="w-full bg-white border-2 border-slate-200 hover:border-purple-300 hover:bg-purple-50 text-slate-700 py-3 rounded-xl font-semibold transition-all flex items-center justify-center gap-3 disabled:opacity-50"
+                        >
+                          <GoogleLogo />
+                          Google orqali ro'yxatdan o'tish
+                        </button>
+
+                        <p className="text-center text-sm text-slate-500">
+                          Hisobingiz bormi?{' '}
+                          <button type="button" onClick={() => switchTab('login')} className="text-purple-600 font-semibold hover:underline">
+                            Kiring
+                          </button>
+                        </p>
+                      </form>
+                    )}
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              <p className="text-xs text-center text-slate-400 mt-4">
+                Davom etish orqali siz{' '}
+                <a href="#" className="text-purple-600 hover:underline">Foydalanish shartlari</a>
+                {' '}va{' '}
+                <a href="#" className="text-purple-600 hover:underline">Maxfiylik siyosati</a>
+                ga rozilik bildirasiz.
+              </p>
+            </div>
+          </motion.div>
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
+// ─── Super filter konstantalar ───────────────────────────────────────────────
+
+const PAGE_SIZE = 9;
+
+const SORT_OPTIONS = [
+  { value: '-rating',      label: 'Reyting',     icon: <Star      className="w-3 h-3" /> },
+  { value: 'hourly_rate',  label: 'Narx ↑',      icon: <ArrowUp   className="w-3 h-3" /> },
+  { value: '-hourly_rate', label: 'Narx ↓',      icon: <ArrowDown className="w-3 h-3" /> },
+  { value: '-experience',  label: 'Tajriba',      icon: <Award     className="w-3 h-3" /> },
+  { value: '-created_at',  label: 'Yangi',        icon: <Sparkles  className="w-3 h-3" /> },
+  { value: '-reviews_count', label: 'Sharhlar',   icon: <MessageSquareQuote className="w-3 h-3" /> },
+];
+
+const PRICE_PRESETS = [
+  { label: '<30 000',    min: 0,      max: 30000  },
+  { label: '30–50 000',  min: 30000,  max: 50000  },
+  { label: '50–80 000',  min: 50000,  max: 80000  },
+  { label: '80 000+',    min: 80000,  max: 0      },
+];
+
+const EXP_OPTIONS = [
+  { value: 0, label: 'Bari'  },
+  { value: 1, label: '1+ yil' },
+  { value: 3, label: '3+ yil' },
+  { value: 5, label: '5+ yil' },
+];
+// ─── NannyCard komponenti ────────────────────────────────────────────────────
+
+interface NannyCardProps {
+  nanny: DisplayNanny;
+  onSelect: () => void;
+  onBook: () => void;
+}
+
+function NannyCard({ nanny, onSelect, onBook }: NannyCardProps) {
+  return (
+    <motion.div
+      whileHover={{ y: -3 }}
+      onClick={onSelect}
+      className="bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-md transition-all cursor-pointer overflow-hidden group"
+    >
+      {/* Top: photo + name */}
+      <div className="p-4 pb-0 flex items-start gap-3">
+        <div className="relative shrink-0">
+          <img src={nanny.imageUrl} alt={nanny.name} className="w-14 h-14 rounded-xl object-cover" />
+          {nanny.videoUrl && (
+            <div className="absolute inset-0 bg-black/50 rounded-xl opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
+              <Play className="w-5 h-5 text-white ml-0.5" />
+            </div>
+          )}
+          <span className="absolute -bottom-0.5 -right-0.5 w-3.5 h-3.5 bg-green-500 rounded-full border-2 border-white" />
+        </div>
+
+        <div className="flex-1 min-w-0">
+          <div className="flex items-start justify-between gap-1">
+            <h3 className="font-bold text-slate-900 text-sm leading-tight truncate">{nanny.name}</h3>
+            <div className="flex items-center gap-0.5 shrink-0">
+              {nanny.isPro && (
+                <span className="flex items-center gap-0.5 px-1.5 py-0.5 bg-gradient-to-r from-amber-400 to-orange-500 rounded-full text-[10px] font-bold text-white leading-none">
+                  ★ Pro
+                </span>
+              )}
+              {nanny.isVerified && (
+                <BadgeCheck className="w-4 h-4 text-green-500 mt-0.5" />
+              )}
+            </div>
+          </div>
+          <div className="flex items-center gap-1 mt-0.5">
+            <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-400" />
+            <span className="text-xs font-bold text-slate-800">{nanny.rating}</span>
+            <span className="text-xs text-slate-400">({nanny.reviews})</span>
+          </div>
+          <div className="flex items-center gap-1.5 mt-0.5 text-xs text-slate-500">
+            <Clock className="w-3 h-3" />
+            <span>{nanny.experience}</span>
+            {nanny.locationName && (
+              <>
+                <span className="text-slate-300">·</span>
+                <MapPin className="w-3 h-3" />
+                <span className="truncate max-w-[80px]">{nanny.locationName}</span>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* Skills */}
+      <div className="px-4 pt-3 flex flex-wrap gap-1.5">
+        {nanny.skills.slice(0, 3).map((skill, i) => (
+          <span key={i} className="px-2 py-0.5 bg-purple-50 text-purple-700 rounded-full text-[11px] font-medium">
+            {skill}
+          </span>
+        ))}
+        {nanny.skills.length > 3 && (
+          <span className="px-2 py-0.5 bg-slate-50 text-slate-500 rounded-full text-[11px] font-medium">
+            +{nanny.skills.length - 3}
+          </span>
+        )}
+      </div>
+
+      {/* Footer: price + buttons */}
+      <div className="px-4 py-3 mt-2 border-t border-slate-50 flex items-center justify-between gap-2">
+        <div>
+          <span className="font-extrabold text-slate-900 text-sm">{nanny.hourlyRate}</span>
+          <span className="text-[11px] text-slate-400">/soat</span>
+        </div>
+        <div className="flex items-center gap-1.5">
+          <button
+            onClick={e => { e.stopPropagation(); onBook(); }}
+            className="px-3 py-1.5 bg-purple-600 hover:bg-purple-700 text-white text-xs font-bold rounded-lg transition-colors flex items-center gap-1"
+          >
+            <Calendar className="w-3.5 h-3.5" />
+            Oldindan ko'rish
+          </button>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
 export default function App() {
+  const navigate = useNavigate();
+
+  // ─── Zustand auth store ────────────────────────────────────────────────────
+  const {
+    firebaseUser: user,
+    djangoUser,
+    role: userRole,
+    isAuthReady,
+    isLoading: authLoading,
+    error: authError,
+    clearError,
+    loginWithGoogle,
+    loginWithEmail,
+    loginWithEmailOTP,
+    loginWithTelegram,
+    completeRegister,
+    completeTelegramRegister,
+    selectRole,
+    logout: storeLogout,
+  } = useAuthStore();
+
+  // Kirgan foydalanuvchi ma'lumotlari (Firebase yoki Django)
+  const isLoggedIn = !!user || !!djangoUser;
+  const displayName = djangoUser?.name || user?.displayName || 'Foydalanuvchi';
+  const displayPhoto = djangoUser?.photo || user?.photoURL || null;
+
+  // ─── UI state ─────────────────────────────────────────────────────────────
   const [isMenuOpen, setIsMenuOpen] = useState(false);
   const [activeTab, setActiveTab] = useState<'parents' | 'nannies'>('parents');
   const [isSearchOpen, setIsSearchOpen] = useState(false);
-  const [selectedNanny, setSelectedNanny] = useState<typeof MOCK_NANNIES[0] | null>(null);
-
-  // Auth State
-  const [user, setUser] = useState<User | null>(null);
-  const [userRole, setUserRole] = useState<'parent' | 'nanny' | 'admin' | null>(null);
+  const [selectedNanny, setSelectedNanny] = useState<DisplayNanny | null>(null);
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
   const [isRoleSelectModalOpen, setIsRoleSelectModalOpen] = useState(false);
   const [isUserMenuOpen, setIsUserMenuOpen] = useState(false);
-  const [isAuthReady, setIsAuthReady] = useState(false);
-  const [currentView, setCurrentView] = useState<'home' | 'dashboard'>('home');
 
-  useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, async (currentUser) => {
-      setUser(currentUser);
-      if (currentUser) {
-        try {
-          const userDoc = await getDoc(doc(db, 'users', currentUser.uid));
-          if (userDoc.exists()) {
-            setUserRole(userDoc.data().role);
-          } else {
-            // User exists in Auth but not in Firestore, needs role selection
-            setIsRoleSelectModalOpen(true);
-          }
-        } catch (error) {
-          console.error("Error fetching user role:", error);
-        }
-      } else {
-        setUserRole(null);
+  // ─── Nannies from API ──────────────────────────────────────────────────────
+  const [apiNannies, setApiNannies] = useState<DisplayNanny[]>([]);
+  const [totalNannies, setTotalNannies] = useState(0);
+  const [apiNanniesLoading, setApiNanniesLoading] = useState(false);
+  const nannySearchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const nannyLoadCtrl = useRef<AbortController | null>(null);
+
+  // Super filter holati
+  interface NannyFilterState {
+    search:     string;
+    skill:      string;
+    minRate:    string;
+    maxRate:    string;
+    minRating:  number;
+    minExp:     number;
+    isVerified: boolean;
+    ordering:   string;
+    lat:        number | null;
+    lon:        number | null;
+    radiusKm:   number;
+  }
+  const DEFAULT_FILTER: NannyFilterState = {
+    search: '', skill: '', minRate: '', maxRate: '',
+    minRating: 0, minExp: 0, isVerified: false, ordering: '-rating',
+    lat: null, lon: null, radiusKm: 10,
+  };
+  const [nannyFilter, setNannyFilter] = useState<NannyFilterState>(DEFAULT_FILTER);
+  const [filterDraft, setFilterDraft] = useState<NannyFilterState>(DEFAULT_FILTER);
+  const [isFilterOpen, setIsFilterOpen] = useState(false);
+  const [nannyPage, setNannyPage] = useState(1);
+  const [geoLoading, setGeoLoading] = useState(false);
+  const [geoError, setGeoError] = useState('');
+
+  // ─── Reviews for selected nanny ────────────────────────────────────────────
+  const [selectedNannyReviews, setSelectedNannyReviews] = useState<Review[]>([]);
+  const [reviewsLoading, setReviewsLoading] = useState(false);
+
+  // ─── Latest reviews for landing page ──────────────────────────────────────
+  const [landingReviews, setLandingReviews] = useState<Review[]>([]);
+  const [landingReviewsLoading, setLandingReviewsLoading] = useState(true);
+
+  // ─── Booking modal ─────────────────────────────────────────────────────────
+  const [bookingNanny, setBookingNanny] = useState<DisplayNanny | null>(null);
+  const [bookingForm, setBookingForm] = useState({ start_date: '', end_date: '', hours_per_day: 4, address: '', notes: '', is_trial: false });
+  const [bookingLoading, setBookingLoading] = useState(false);
+  const [bookingSuccess, setBookingSuccess] = useState(false);
+  const [bookingError, setBookingError] = useState('');
+
+  // ─── Load nannies from API (debounced 350ms) ──────────────────────────────
+  const loadNannies = useCallback((f?: NannyFilterState, page = 1) => {
+    if (nannySearchTimer.current) clearTimeout(nannySearchTimer.current);
+    nannySearchTimer.current = setTimeout(async () => {
+    nannyLoadCtrl.current?.abort();
+    const ctrl = new AbortController();
+    nannyLoadCtrl.current = ctrl;
+
+    setApiNanniesLoading(true);
+    try {
+      const params: Record<string, string | number | boolean | undefined | null> = {
+        page,
+        page_size: PAGE_SIZE,
+        ordering: f?.ordering || '-rating',
+      };
+      if (f?.search)                       params.search      = f.search;
+      if (f?.skill)                        params.skill       = f.skill;
+      if (f?.minRate && +f.minRate > 0)    params.min_rate    = +f.minRate;
+      if (f?.maxRate && +f.maxRate > 0)    params.max_rate    = +f.maxRate;
+      if (f?.minRating && f.minRating > 0) params.min_rating  = f.minRating;
+      if (f?.minExp && f.minExp > 0)       params.min_exp     = f.minExp;
+      if (f?.isVerified)                   params.is_verified = true;
+      if (f?.lat && f?.lon) {
+        params.lat       = f.lat;
+        params.lon       = f.lon;
+        params.radius_km = f.radiusKm || 10;
       }
-      setIsAuthReady(true);
-    });
-    return () => unsubscribe();
+
+      const res = await getNannies(
+        params as import('./api/types').NannyListParams,
+        ctrl.signal,
+      );
+      setApiNannies((res.results || []).map(nannyFromApi));
+      setTotalNannies(res.count || 0);
+    } catch (e: unknown) {
+      if (e instanceof DOMException && e.name === 'AbortError') return;
+      setApiNannies([]);
+    } finally {
+      setApiNanniesLoading(false);
+    }
+    }, 350);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  useEffect(() => {
+    loadNannies(DEFAULT_FILTER);
+    return () => { nannyLoadCtrl.current?.abort(); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [loadNannies]);
+
+  useEffect(() => {
+    getLatestReviews(6)
+      .then(setLandingReviews)
+      .catch(() => {})
+      .finally(() => setLandingReviewsLoading(false));
+  }, []);
+
+  // ─── Load reviews when nanny profile opens ─────────────────────────────────
+  useEffect(() => {
+    if (!selectedNanny?.apiId) {
+      setSelectedNannyReviews([]);
+      return;
+    }
+    setReviewsLoading(true);
+    getNannyReviews(selectedNanny.apiId)
+      .then(res => setSelectedNannyReviews(res.results || []))
+      .catch(() => setSelectedNannyReviews([]))
+      .finally(() => setReviewsLoading(false));
+  }, [selectedNanny?.apiId]);
+
+  // ─── Auth handlers ─────────────────────────────────────────────────────────
   const handleLogin = async () => {
+    setIsAuthModalOpen(false);
     try {
-      setIsAuthModalOpen(false);
-      const result = await signInWithPopup(auth, googleProvider);
-      const user = result.user;
-      
-      // Check if user exists in Firestore
-      const userDoc = await getDoc(doc(db, 'users', user.uid));
-      if (!userDoc.exists()) {
-        setIsRoleSelectModalOpen(true);
-      }
-    } catch (error) {
-      console.error("Login error:", error);
+      const { needsRole } = await loginWithGoogle();
+      if (needsRole) setIsRoleSelectModalOpen(true);
+      else { clearAuthFlow(); navigate('/dashboard'); }
+    } catch {
+      setIsAuthModalOpen(true);
+    }
+  };
+
+  const handleTelegramLogin = async (data: Record<string, string | number>) => {
+    setIsAuthModalOpen(false);
+    try {
+      await loginWithTelegram(data, 'parent');
+      clearAuthFlow();
+      const { role } = useAuthStore.getState();
+      navigate(role === 'admin' ? '/admin' : '/dashboard');
+    } catch {
+      setIsAuthModalOpen(true);
     }
   };
 
   const handleRoleSelect = async (role: 'parent' | 'nanny') => {
-    if (!user) return;
     try {
-      await setDoc(doc(db, 'users', user.uid), {
-        uid: user.uid,
-        role: role,
-        name: user.displayName || 'Foydalanuvchi',
-        email: user.email,
-        photoUrl: user.photoURL,
-        createdAt: serverTimestamp(),
-        updatedAt: serverTimestamp()
-      });
-      setUserRole(role);
+      await selectRole(role);
       setIsRoleSelectModalOpen(false);
-    } catch (error) {
-      handleFirestoreError(error, OperationType.CREATE, `users/${user.uid}`);
+      navigate(role === 'nanny' ? '/onboarding' : '/dashboard');
+    } catch {
+      // xato authError orqali ko'rsatiladi
     }
   };
 
   const handleLogout = async () => {
+    await storeLogout();
+    setIsUserMenuOpen(false);
+  };
+
+  // ─── Booking ───────────────────────────────────────────────────────────────
+  const handleCreateBooking = async () => {
+    if (!bookingNanny?.nannyUserId || !djangoUser) return;
+    setBookingLoading(true);
+    setBookingError('');
     try {
-      await signOut(auth);
-      setIsUserMenuOpen(false);
-    } catch (error) {
-      console.error("Logout error:", error);
+      await createBooking({
+        nanny_id:      bookingNanny.nannyUserId,
+        start_date:    bookingForm.start_date,
+        end_date:      bookingForm.is_trial ? bookingForm.start_date : bookingForm.end_date,
+        hours_per_day: bookingForm.is_trial ? 1 : bookingForm.hours_per_day,
+        address:       bookingForm.address,
+        notes:         bookingForm.notes,
+        is_trial:      bookingForm.is_trial,
+      });
+      setBookingSuccess(true);
+      setTimeout(() => {
+        setBookingNanny(null);
+        setBookingSuccess(false);
+        setBookingForm({ start_date: '', end_date: '', hours_per_day: 4, address: '', notes: '' });
+      }, 2000);
+    } catch (err: unknown) {
+      setBookingError(err instanceof Error ? err.message : 'Buyurtmani saqlashda xato yuz berdi');
+    } finally {
+      setBookingLoading(false);
     }
   };
+
+  // ─── Filter helpers ────────────────────────────────────────────────────────
+  const applyFilter = (next: NannyFilterState) => {
+    setNannyFilter(next);
+    setFilterDraft(next);
+    setNannyPage(1);
+    loadNannies(next, 1);
+  };
+
+  const applyDraft = () => {
+    setNannyFilter(filterDraft);
+    setNannyPage(1);
+    loadNannies(filterDraft, 1);
+  };
+
+  const resetFilter = () => {
+    setFilterDraft(DEFAULT_FILTER);
+    applyFilter(DEFAULT_FILTER);
+  };
+
+  const handleGeoLocate = () => {
+    if (!navigator.geolocation) {
+      setGeoError('Brauzer geolokatsiyani qo\'llab-quvvatlamaydi');
+      return;
+    }
+    setGeoLoading(true);
+    setGeoError('');
+    navigator.geolocation.getCurrentPosition(
+      ({ coords }) => {
+        const next = { ...filterDraft, lat: coords.latitude, lon: coords.longitude };
+        setFilterDraft(next);
+        setNannyFilter(next);
+        setNannyPage(1);
+        loadNannies(next, 1);
+        setGeoLoading(false);
+      },
+      () => {
+        setGeoError('Joylashuv aniqlanmadi. Ruxsat bering.');
+        setGeoLoading(false);
+      },
+      { enableHighAccuracy: true, timeout: 8000 }
+    );
+  };
+
+  const goToPage = (p: number) => {
+    setNannyPage(p);
+    loadNannies(nannyFilter, p);
+    document.getElementById('enagalar')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  // Debounced search inside filter draft
+  const handleDraftSearch = (value: string) => {
+    const next = { ...filterDraft, search: value };
+    setFilterDraft(next);
+    if (nannySearchTimer.current) clearTimeout(nannySearchTimer.current);
+    nannySearchTimer.current = setTimeout(() => {
+      setNannyFilter(next);
+      setNannyPage(1);
+      loadNannies(next, 1);
+    }, 350);
+  };
+
+  // Active filter count (for badge)
+  const activeFilterCount = [
+    filterDraft.skill,
+    filterDraft.minRate,
+    filterDraft.maxRate,
+    filterDraft.minRating > 0,
+    filterDraft.minExp > 0,
+    filterDraft.isVerified,
+    filterDraft.ordering !== '-rating',
+    filterDraft.lat !== null,
+  ].filter(Boolean).length;
+
+  const displayNannies: DisplayNanny[] = apiNannies;
 
   return (
     <div className="min-h-screen bg-slate-50 font-sans text-slate-900 selection:bg-purple-200 selection:text-purple-900">
@@ -485,15 +1762,7 @@ export default function App() {
             
             {/* Desktop Nav */}
             <div className="hidden md:flex items-center space-x-8">
-              {currentView === 'dashboard' && (
-                <button 
-                  onClick={() => setCurrentView('home')}
-                  className="text-sm font-medium text-slate-600 hover:text-purple-600 transition-colors flex items-center gap-2"
-                >
-                  <ChevronLeft className="w-4 h-4" /> Bosh sahifa
-                </button>
-              )}
-              {currentView === 'home' && (
+              {(
                 <>
                   <a href="#imkoniyatlar" className="text-sm font-medium text-slate-600 hover:text-purple-600 transition-colors">Imkoniyatlar</a>
                   <a href="#afzalliklar" className="text-sm font-medium text-slate-600 hover:text-purple-600 transition-colors">Afzalliklar</a>
@@ -502,8 +1771,8 @@ export default function App() {
                 </>
               )}
               
-              {isAuthReady && !user && (
-                <button 
+              {isAuthReady && !isLoggedIn && (
+                <button
                   onClick={() => setIsAuthModalOpen(true)}
                   className="bg-purple-600 hover:bg-purple-700 text-white px-5 py-2 rounded-full text-sm font-medium transition-colors shadow-sm shadow-purple-200"
                 >
@@ -511,40 +1780,55 @@ export default function App() {
                 </button>
               )}
 
-              {isAuthReady && user && (
+              {isAuthReady && isLoggedIn && (
                 <div className="relative">
-                  <button 
+                  <button
                     onClick={() => setIsUserMenuOpen(!isUserMenuOpen)}
                     className="flex items-center gap-2 focus:outline-none"
                   >
-                    <img 
-                      src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName || 'User'}&background=random`} 
-                      alt="Profile" 
-                      className="w-10 h-10 rounded-full border-2 border-purple-200 object-cover"
-                    />
+                    {displayPhoto ? (
+                      <img
+                        src={displayPhoto}
+                        alt="Profile"
+                        className="w-10 h-10 rounded-full border-2 border-purple-200 object-cover"
+                      />
+                    ) : (
+                      <div className="w-10 h-10 rounded-full border-2 border-purple-200 bg-purple-100 flex items-center justify-center text-purple-700 font-bold text-sm">
+                        {displayName.charAt(0).toUpperCase()}
+                      </div>
+                    )}
                   </button>
-                  
+
                   <AnimatePresence>
                     {isUserMenuOpen && (
-                      <motion.div 
+                      <motion.div
                         initial={{ opacity: 0, y: 10 }}
                         animate={{ opacity: 1, y: 0 }}
                         exit={{ opacity: 0, y: 10 }}
-                        className="absolute right-0 mt-2 w-48 bg-white rounded-xl shadow-xl border border-slate-100 overflow-hidden z-50"
+                        className="absolute right-0 mt-2 w-56 bg-white rounded-xl shadow-xl border border-slate-100 overflow-hidden z-50"
                       >
-                        <div className="px-4 py-3 border-b border-slate-100 bg-slate-50">
-                          <p className="text-sm font-medium text-slate-900 truncate">{user.displayName}</p>
-                          <p className="text-xs text-slate-500 truncate">{userRole === 'nanny' ? 'Enaga' : userRole === 'parent' ? 'Ota-ona' : 'Foydalanuvchi'}</p>
+                        <div className="px-4 py-3 border-b border-slate-100 bg-slate-50 flex items-center gap-3">
+                          {displayPhoto ? (
+                            <img src={displayPhoto} alt="" className="w-9 h-9 rounded-full object-cover shrink-0" />
+                          ) : (
+                            <div className="w-9 h-9 rounded-full bg-purple-100 flex items-center justify-center text-purple-700 font-bold text-sm shrink-0">
+                              {displayName.charAt(0).toUpperCase()}
+                            </div>
+                          )}
+                          <div className="min-w-0">
+                            <p className="text-sm font-semibold text-slate-900 truncate">{displayName}</p>
+                            <p className="text-xs text-slate-500 truncate">{userRole === 'nanny' ? 'Enaga' : userRole === 'parent' ? 'Ota-ona' : 'Foydalanuvchi'}</p>
+                          </div>
                         </div>
                         <div className="py-1">
-                          <button 
-                            onClick={() => { setCurrentView('dashboard'); setIsUserMenuOpen(false); }}
+                          <button
+                            onClick={() => { navigate(userRole === 'admin' ? '/admin' : '/dashboard'); setIsUserMenuOpen(false); }}
                             className="w-full text-left px-4 py-2 text-sm text-slate-700 hover:bg-purple-50 hover:text-purple-700 transition-colors"
                           >
                             Shaxsiy kabinet
                           </button>
-                          <button 
-                            onClick={() => { handleLogout(); setCurrentView('home'); }}
+                          <button
+                            onClick={() => { handleLogout(); setIsUserMenuOpen(false); }}
                             className="w-full text-left px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
                           >
                             Tizimdan chiqish
@@ -583,34 +1867,41 @@ export default function App() {
               <a href="#qanday-ishlaydi" onClick={() => setIsMenuOpen(false)} className="block px-3 py-2 rounded-md text-base font-medium text-slate-700 hover:text-purple-600 hover:bg-purple-50">Qanday ishlaydi?</a>
               <a href="#kelajak" onClick={() => setIsMenuOpen(false)} className="block px-3 py-2 rounded-md text-base font-medium text-slate-700 hover:text-purple-600 hover:bg-purple-50">Kelajak rejalar</a>
               
-              {!user ? (
-                <button 
+              {isAuthReady && !isLoggedIn && (
+                <button
                   onClick={() => { setIsMenuOpen(false); setIsAuthModalOpen(true); }}
                   className="w-full mt-4 bg-purple-600 text-white px-5 py-3 rounded-xl font-medium"
                 >
                   Kirish
                 </button>
-              ) : (
+              )}
+              {isAuthReady && isLoggedIn && (
                 <div className="mt-4 border-t border-slate-100 pt-4">
                   <div className="flex items-center gap-3 px-3 mb-4">
-                    <img 
-                      src={user.photoURL || `https://ui-avatars.com/api/?name=${user.displayName || 'User'}&background=random`} 
-                      alt="Profile" 
-                      className="w-10 h-10 rounded-full border border-slate-200"
-                    />
+                    {displayPhoto ? (
+                      <img
+                        src={displayPhoto}
+                        alt="Profile"
+                        className="w-10 h-10 rounded-full border border-slate-200 object-cover"
+                      />
+                    ) : (
+                      <div className="w-10 h-10 rounded-full bg-purple-100 border border-slate-200 flex items-center justify-center text-purple-700 font-bold text-sm">
+                        {displayName.charAt(0).toUpperCase()}
+                      </div>
+                    )}
                     <div>
-                      <p className="text-sm font-medium text-slate-900">{user.displayName}</p>
+                      <p className="text-sm font-medium text-slate-900">{displayName}</p>
                       <p className="text-xs text-slate-500">{userRole === 'nanny' ? 'Enaga' : userRole === 'parent' ? 'Ota-ona' : ''}</p>
                     </div>
                   </div>
-                  <button 
-                    onClick={() => { setCurrentView('dashboard'); setIsMenuOpen(false); }}
+                  <button
+                    onClick={() => { navigate(userRole === 'admin' ? '/admin' : '/dashboard'); setIsMenuOpen(false); }}
                     className="w-full text-left px-3 py-2 text-base font-medium text-slate-700 hover:text-purple-600 hover:bg-purple-50 rounded-md"
                   >
                     Shaxsiy kabinet
                   </button>
-                  <button 
-                    onClick={() => { setIsMenuOpen(false); handleLogout(); setCurrentView('home'); }}
+                  <button
+                    onClick={() => { setIsMenuOpen(false); handleLogout(); }}
                     className="w-full text-left px-3 py-2 text-base font-medium text-red-600 hover:bg-red-50 rounded-md mt-1"
                   >
                     Tizimdan chiqish
@@ -623,10 +1914,7 @@ export default function App() {
       </nav>
 
       <main className="pt-16">
-        {currentView === 'dashboard' && user && userRole ? (
-          <Dashboard user={user} userRole={userRole} onLogout={() => { handleLogout(); setCurrentView('home'); }} />
-        ) : (
-          <>
+        <>
             {/* Hero Section */}
             <section className="relative overflow-hidden bg-white pt-16 pb-24 lg:pt-32 lg:pb-40">
           <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_top_right,_var(--tw-gradient-stops))] from-purple-100 via-white to-white opacity-50"></div>
@@ -653,26 +1941,35 @@ export default function App() {
                 </p>
                 <div className="flex flex-col sm:flex-row gap-4">
                   <button 
-                    onClick={() => setIsSearchOpen(true)}
+                    onClick={() => document.getElementById("enagalar")?.scrollIntoView({ behavior: "smooth" })}
                     className="bg-purple-600 hover:bg-purple-700 text-white px-8 py-4 rounded-xl text-lg font-semibold transition-all shadow-lg shadow-purple-200 flex items-center justify-center gap-2 group"
                   >
                     Enaga izlash
                     <ArrowRight className="w-5 h-5 group-hover:translate-x-1 transition-transform" />
                   </button>
-                  <button 
-                    onClick={() => !user && setIsAuthModalOpen(true)}
+                  <button
+                    onClick={() => isLoggedIn ? navigate('/dashboard') : setIsAuthModalOpen(true)}
                     className="bg-white border-2 border-slate-200 hover:border-purple-200 hover:bg-purple-50 text-slate-700 px-8 py-4 rounded-xl text-lg font-semibold transition-all flex items-center justify-center"
                   >
-                    G'amxo'r bo'lish
+                    {isLoggedIn ? 'Shaxsiy kabinet' : "G'amxo'r bo'lish"}
                   </button>
                 </div>
-                <div className="mt-10 flex items-center gap-4 text-sm text-slate-500">
-                  <div className="flex -space-x-2">
-                    {[1, 2, 3, 4].map((i) => (
-                      <img key={i} className="w-8 h-8 rounded-full border-2 border-white" src={`https://i.pravatar.cc/100?img=${i + 10}`} alt="User" />
-                    ))}
+                <div className="mt-10 flex items-center gap-6 text-sm text-slate-500 flex-wrap">
+                  <div className="flex items-center gap-3">
+                    <div className="flex -space-x-2">
+                      {[1, 2, 3, 4].map((i) => (
+                        <img key={i} className="w-8 h-8 rounded-full border-2 border-white" src={`https://i.pravatar.cc/100?img=${i + 10}`} alt="User" />
+                      ))}
+                    </div>
+                    <p>1000+ oilalar ishonchi</p>
                   </div>
-                  <p>1000+ oilalar ishonchi</p>
+                  {totalNannies > 0 && (
+                    <div className="flex items-center gap-2 px-3 py-1.5 bg-purple-50 rounded-full border border-purple-100">
+                      <span className="w-2 h-2 bg-green-500 rounded-full animate-pulse inline-block" />
+                      <span className="font-semibold text-purple-700">{totalNannies}</span>
+                      <span className="text-purple-600">ta enaga ro'yxatda</span>
+                    </div>
+                  )}
                 </div>
               </motion.div>
               
@@ -750,114 +2047,554 @@ export default function App() {
           </div>
         </section>
 
-        {/* Top Candidates in Navoiy Section */}
-        <section className="py-24 bg-white">
+        {/* ── Enagalar bo'limi (inline filter + grid + pagination) ── */}
+        <section id="enagalar" className="py-16 bg-slate-50 border-t border-slate-100">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
-            <div className="text-center max-w-3xl mx-auto mb-16">
-              <motion.h2 
-                initial={{ opacity: 0, y: 20 }}
+
+            {/* Section header */}
+            <div className="mb-10">
+              <motion.h2
+                initial={{ opacity: 0, y: 16 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true }}
-                className="text-3xl md:text-4xl font-bold text-slate-900 mb-4"
+                className="text-3xl md:text-4xl font-bold text-slate-900 mb-2"
               >
-                Navoiy shahri bo'yicha eng yaxshi nomzodlar
+                Barcha enagalar
               </motion.h2>
-              <motion.p 
-                initial={{ opacity: 0, y: 20 }}
-                whileInView={{ opacity: 1, y: 0 }}
-                viewport={{ once: true }}
-                transition={{ delay: 0.1 }}
-                className="text-lg text-slate-600"
-              >
-                Ota-onalar tomonidan eng yuqori baholangan va ishonchli enagalar bilan tanishing.
-              </motion.p>
+              <p className="text-slate-500 text-base">
+                {apiNanniesLoading ? 'Qidirilmoqda...' : `${totalNannies} ta enaga topildi`}
+              </p>
             </div>
-            
-            <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
-              {MOCK_NANNIES.filter(n => n.locationName?.includes('Navoiy')).map((nanny, index) => (
-                <motion.div 
-                  key={nanny.id}
-                  initial={{ opacity: 0, y: 20 }}
-                  whileInView={{ opacity: 1, y: 0 }}
-                  viewport={{ once: true }}
-                  transition={{ delay: index * 0.1 }}
-                  className="bg-slate-50 rounded-3xl p-6 border border-slate-100 hover:shadow-xl hover:shadow-purple-900/5 transition-all group flex flex-col"
-                >
-                  <div 
-                    className="relative mb-6 cursor-pointer overflow-hidden rounded-2xl"
-                    onClick={() => setSelectedNanny(nanny)}
-                  >
-                    <img src={nanny.imageUrl} alt={nanny.name} className="w-full h-64 object-cover transition-transform duration-500 group-hover:scale-105" />
-                    <div className="absolute inset-0 bg-black/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
-                      <div className="w-14 h-14 bg-white/90 backdrop-blur-sm rounded-full flex items-center justify-center shadow-lg transform scale-90 group-hover:scale-100 transition-all">
-                        <Play className="w-6 h-6 text-purple-600 ml-1" />
-                      </div>
-                    </div>
-                    <div className="absolute top-4 left-4 bg-purple-600/90 backdrop-blur-sm text-white px-3 py-1 rounded-full flex items-center gap-1.5 shadow-sm text-xs font-medium">
-                      <Video className="w-3.5 h-3.5" />
-                      30-soniyali intervyu
-                    </div>
-                    <div className="absolute top-4 right-4 bg-white/90 backdrop-blur-sm px-3 py-1 rounded-full flex items-center gap-1 shadow-sm">
-                      <Star className="w-4 h-4 text-yellow-500 fill-yellow-500" />
-                      <span className="font-bold text-slate-900">{nanny.rating}</span>
+
+            <div className="flex gap-6 items-start">
+
+              {/* ── Filter sidebar (desktop) ── */}
+              <aside className="hidden lg:flex w-[400px] shrink-0 flex-col bg-white rounded-2xl border border-slate-100 shadow-sm sticky top-20 max-h-[calc(100vh-6rem)] overflow-y-auto">
+
+                {/* Search */}
+                <div className="px-5 pt-5 pb-3">
+                  <div className="relative">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={filterDraft.search}
+                      onChange={e => handleDraftSearch(e.target.value)}
+                      placeholder="Ism yoki joylashuv..."
+                      className="w-full pl-9 pr-3 py-2.5 text-sm rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-purple-300 focus:border-transparent bg-slate-50 focus:bg-white transition-all"
+                    />
+                  </div>
+                </div>
+
+                <div className="px-5 space-y-5 pb-4 flex-1">
+
+                  {/* Saralash */}
+                  <div>
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+                      <ArrowUpDown className="w-3.5 h-3.5" /> Saralash tartibi
+                    </p>
+                    <div className="grid grid-cols-2 gap-1.5">
+                      {SORT_OPTIONS.map(opt => (
+                        <button
+                          key={opt.value}
+                          onClick={() => {
+                            const next = { ...filterDraft, ordering: opt.value };
+                            setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1);
+                          }}
+                          className={`px-2 py-2 rounded-xl text-xs font-semibold transition-all flex items-center gap-1.5 justify-center ${
+                            filterDraft.ordering === opt.value
+                              ? 'bg-purple-600 text-white shadow-sm'
+                              : 'bg-slate-50 text-slate-600 hover:bg-purple-50 hover:text-purple-700'
+                          }`}
+                        >
+                          {opt.icon} {opt.label}
+                        </button>
+                      ))}
                     </div>
                   </div>
-                  <h3 className="text-xl font-bold text-slate-900 mb-2">{nanny.name}</h3>
-                  <div className="flex items-center gap-4 text-sm text-slate-600 mb-4">
-                    <span className="flex items-center gap-1"><Clock className="w-4 h-4" /> {nanny.experience} tajriba</span>
-                    <span className="flex items-center gap-1"><MapPin className="w-4 h-4" /> Navoiy</span>
+
+                  {/* Reyting */}
+                  <div>
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+                      <Star className="w-3.5 h-3.5" /> Minimal reyting
+                    </p>
+                    <div className="flex gap-1.5">
+                      {[0, 3, 4, 5].map(r => (
+                        <button
+                          key={r}
+                          onClick={() => {
+                            const next = { ...filterDraft, minRating: filterDraft.minRating === r ? 0 : r };
+                            setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1);
+                          }}
+                          className={`flex-1 py-2 rounded-xl text-xs font-bold transition-all border ${
+                            filterDraft.minRating === r
+                              ? 'bg-amber-400 text-white border-amber-400 shadow-sm'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-amber-300 hover:text-amber-600'
+                          }`}
+                        >
+                          {r === 0 ? 'Bari' : `${r}★+`}
+                        </button>
+                      ))}
+                    </div>
                   </div>
-                  <div className="flex flex-wrap gap-2 mb-6 flex-grow">
-                    {nanny.skills.slice(0, 3).map((skill, idx) => (
-                      <span key={idx} className="px-3 py-1 bg-purple-100 text-purple-700 rounded-lg text-xs font-medium">
-                        {skill}
-                      </span>
-                    ))}
-                    {nanny.skills.length > 3 && (
-                      <span className="px-3 py-1 bg-slate-200 text-slate-700 rounded-lg text-xs font-medium">
-                        +{nanny.skills.length - 3}
-                      </span>
-                    )}
-                  </div>
-                  <div className="flex items-center justify-between pt-4 border-t border-slate-200 mt-auto">
-                    <div>
-                      <p className="text-sm text-slate-500">Soatiga</p>
-                      <p className="font-bold text-purple-700">{nanny.hourlyRate}</p>
+
+                  {/* Narx */}
+                  <div>
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+                      <Banknote className="w-3.5 h-3.5" /> Soatlik narx (so'm)
+                    </p>
+                    <div className="flex flex-wrap gap-1.5 mb-3">
+                      {PRICE_PRESETS.map(p => {
+                        const active = filterDraft.minRate === String(p.min) && filterDraft.maxRate === String(p.max || '');
+                        return (
+                          <button
+                            key={p.label}
+                            onClick={() => {
+                              const next = { ...filterDraft, minRate: String(p.min), maxRate: String(p.max || '') };
+                              setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1);
+                            }}
+                            className={`px-2.5 py-1 rounded-full text-xs font-semibold transition-all border ${
+                              active
+                                ? 'bg-purple-600 text-white border-purple-600 shadow-sm'
+                                : 'bg-white text-slate-600 border-slate-200 hover:border-purple-300 hover:text-purple-700'
+                            }`}
+                          >
+                            {p.label}
+                          </button>
+                        );
+                      })}
                     </div>
                     <div className="flex items-center gap-2">
-                      <button 
-                        onClick={(e) => { e.stopPropagation(); /* Add booking logic */ }}
-                        className="bg-purple-50 hover:bg-purple-100 text-purple-700 px-3 py-2.5 rounded-xl text-sm font-medium transition-colors flex items-center gap-1.5"
-                        title="Sinov darsini belgilash"
-                      >
-                        <Calendar className="w-4 h-4" />
-                        <span className="hidden sm:inline">Sinov darsi</span>
-                      </button>
-                      <button 
-                        onClick={() => setSelectedNanny(nanny)}
-                        className="bg-purple-600 hover:bg-purple-700 text-white px-4 py-2.5 rounded-xl text-sm font-medium transition-colors"
-                      >
-                        Profil
-                      </button>
+                      <input
+                        type="number"
+                        value={filterDraft.minRate}
+                        onChange={e => setFilterDraft(d => ({ ...d, minRate: e.target.value }))}
+                        onBlur={() => { setNannyFilter(filterDraft); setNannyPage(1); loadNannies(filterDraft, 1); }}
+                        placeholder="Min narx"
+                        min={0}
+                        className="flex-1 px-3 py-2 text-xs border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-300 focus:border-transparent"
+                      />
+                      <span className="text-slate-300">—</span>
+                      <input
+                        type="number"
+                        value={filterDraft.maxRate}
+                        onChange={e => setFilterDraft(d => ({ ...d, maxRate: e.target.value }))}
+                        onBlur={() => { setNannyFilter(filterDraft); setNannyPage(1); loadNannies(filterDraft, 1); }}
+                        placeholder="Max narx"
+                        min={0}
+                        className="flex-1 px-3 py-2 text-xs border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-purple-300 focus:border-transparent"
+                      />
                     </div>
                   </div>
-                </motion.div>
-              ))}
+
+                  {/* Tajriba */}
+                  <div>
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+                      <Award className="w-3.5 h-3.5" /> Minimal tajriba
+                    </p>
+                    <div className="grid grid-cols-4 gap-1.5">
+                      {EXP_OPTIONS.map(o => (
+                        <button
+                          key={o.value}
+                          onClick={() => {
+                            const next = { ...filterDraft, minExp: filterDraft.minExp === o.value ? 0 : o.value };
+                            setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1);
+                          }}
+                          className={`py-2 rounded-xl text-xs font-semibold transition-all border ${
+                            filterDraft.minExp === o.value
+                              ? 'bg-purple-600 text-white border-purple-600 shadow-sm'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-purple-300 hover:text-purple-700'
+                          }`}
+                        >
+                          {o.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Ko'nikmalar */}
+                  <div>
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2.5 flex items-center gap-1.5">
+                      <GraduationCap className="w-3.5 h-3.5" /> Ko'nikmalar
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {Object.entries(SKILL_LABELS).map(([key, label]) => (
+                        <button
+                          key={key}
+                          onClick={() => {
+                            const next = { ...filterDraft, skill: filterDraft.skill === key ? '' : key };
+                            setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1);
+                          }}
+                          className={`px-2.5 py-1 rounded-full text-xs font-semibold transition-all border ${
+                            filterDraft.skill === key
+                              ? 'bg-purple-600 text-white border-purple-600 shadow-sm'
+                              : 'bg-white text-slate-600 border-slate-200 hover:border-purple-300 hover:text-purple-700'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Geolokatsiya */}
+                  <div className="rounded-xl border border-blue-100 bg-blue-50 overflow-hidden">
+                    <div className="flex items-center justify-between py-3 px-4">
+                      <div className="flex items-center gap-2">
+                        <MapPin className="w-4 h-4 text-blue-600 shrink-0" />
+                        <div>
+                          <p className="text-xs font-bold text-slate-800">Menga yaqin enagalar</p>
+                          <p className="text-[10px] text-slate-500">GPS orqali aniqlash</p>
+                        </div>
+                      </div>
+                      <button
+                        onClick={handleGeoLocate}
+                        disabled={geoLoading}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                          filterDraft.lat
+                            ? 'bg-blue-600 text-white'
+                            : 'bg-white border border-blue-200 text-blue-600 hover:bg-blue-100'
+                        } disabled:opacity-50`}
+                      >
+                        {geoLoading ? (
+                          <span className="w-3 h-3 border-2 border-blue-400 border-t-transparent rounded-full animate-spin" />
+                        ) : (
+                          <MapPin className="w-3 h-3" />
+                        )}
+                        {filterDraft.lat ? 'Faol' : 'Aniqlash'}
+                      </button>
+                    </div>
+                    {filterDraft.lat && (
+                      <div className="px-4 pb-3">
+                        <div className="flex items-center justify-between mb-1">
+                          <span className="text-[10px] text-slate-500">Radius: <b className="text-slate-700">{filterDraft.radiusKm} km</b></span>
+                          <button
+                            onClick={() => {
+                              const next = { ...filterDraft, lat: null, lon: null, radiusKm: 10 };
+                              setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1);
+                            }}
+                            className="text-[10px] text-red-400 hover:text-red-600 font-semibold"
+                          >
+                            O'chirish
+                          </button>
+                        </div>
+                        <input
+                          type="range" min={1} max={50} step={1}
+                          value={filterDraft.radiusKm}
+                          onChange={e => setFilterDraft(d => ({ ...d, radiusKm: +e.target.value }))}
+                          onMouseUp={() => { setNannyFilter(filterDraft); setNannyPage(1); loadNannies(filterDraft, 1); }}
+                          onTouchEnd={() => { setNannyFilter(filterDraft); setNannyPage(1); loadNannies(filterDraft, 1); }}
+                          className="w-full accent-blue-600"
+                        />
+                        <div className="flex justify-between text-[9px] text-slate-400 mt-0.5">
+                          <span>1 km</span><span>25 km</span><span>50 km</span>
+                        </div>
+                      </div>
+                    )}
+                    {geoError && (
+                      <p className="px-4 pb-3 text-[10px] text-red-500 font-medium">{geoError}</p>
+                    )}
+                  </div>
+
+                  {/* Tasdiqlangan */}
+                  <div className="flex items-center justify-between py-3 px-4 bg-green-50 rounded-xl border border-green-100">
+                    <div className="flex items-center gap-2">
+                      <BadgeCheck className="w-4 h-4 text-green-600 shrink-0" />
+                      <div>
+                        <p className="text-xs font-bold text-slate-800">Faqat tasdiqlangan</p>
+                        <p className="text-[10px] text-slate-500">Admin tekshirgan enagalar</p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={() => {
+                        const next = { ...filterDraft, isVerified: !filterDraft.isVerified };
+                        setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1);
+                      }}
+                      className={`relative rounded-full transition-colors duration-200 ${filterDraft.isVerified ? 'bg-green-500' : 'bg-slate-200'}`}
+                      style={{ width: '40px', height: '22px', minWidth: '40px' }}
+                    >
+                      <span className={`absolute top-0.5 bg-white rounded-full shadow transition-all duration-200 ${filterDraft.isVerified ? 'left-[18px]' : 'left-0.5'}`} style={{ width: '18px', height: '18px' }} />
+                    </button>
+                  </div>
+
+                </div>
+
+                {/* Reset */}
+                <div className="px-5 py-4 border-t border-slate-100 shrink-0">
+                  {activeFilterCount > 0 && (
+                    <button
+                      onClick={resetFilter}
+                      className="w-full flex items-center justify-center gap-2 py-2.5 text-xs font-semibold text-red-500 hover:bg-red-50 rounded-xl transition-colors"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Tozalash ({activeFilterCount})
+                    </button>
+                  )}
+                </div>
+              </aside>
+
+              {/* ── Results ── */}
+              <div className="flex-1 min-w-0">
+
+                {/* Mobile: search + filter toggle */}
+                <div className="lg:hidden mb-4 flex gap-2">
+                  <div className="flex-1 relative">
+                    <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                    <input
+                      type="text"
+                      value={filterDraft.search}
+                      onChange={e => handleDraftSearch(e.target.value)}
+                      placeholder="Qidirish..."
+                      className="w-full pl-9 pr-3 py-2.5 text-sm rounded-xl border border-slate-200 bg-white focus:outline-none focus:ring-2 focus:ring-purple-300"
+                    />
+                  </div>
+                  <button
+                    onClick={() => setIsFilterOpen(f => !f)}
+                    className={`flex items-center gap-1.5 px-3 py-2.5 rounded-xl text-sm font-semibold border transition-all ${
+                      isFilterOpen || activeFilterCount > 0
+                        ? 'bg-purple-600 text-white border-purple-600'
+                        : 'bg-white text-slate-600 border-slate-200'
+                    }`}
+                  >
+                    <Filter className="w-4 h-4" />
+                    Filtr
+                    {activeFilterCount > 0 && (
+                      <span className="bg-white text-purple-600 text-[10px] font-extrabold rounded-full w-4 h-4 flex items-center justify-center">
+                        {activeFilterCount}
+                      </span>
+                    )}
+                  </button>
+                </div>
+
+                {/* Mobile filter panel */}
+                <AnimatePresence>
+                  {isFilterOpen && (
+                    <motion.div
+                      initial={{ height: 0, opacity: 0 }}
+                      animate={{ height: 'auto', opacity: 1 }}
+                      exit={{ height: 0, opacity: 0 }}
+                      className="lg:hidden overflow-hidden bg-white rounded-2xl border border-slate-100 mb-4"
+                    >
+                      <div className="px-4 py-4 space-y-4">
+                        <div>
+                          <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Saralash</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {SORT_OPTIONS.map(opt => (
+                              <button key={opt.value}
+                                onClick={() => { const next = { ...filterDraft, ordering: opt.value }; setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1); }}
+                                className={`px-2.5 py-1.5 rounded-xl text-xs font-semibold border transition-all flex items-center gap-1 ${filterDraft.ordering === opt.value ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-slate-600 border-slate-200'}`}>
+                                {opt.icon} {opt.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Reyting</p>
+                          <div className="flex gap-1.5">
+                            {[0, 3, 4, 5].map(r => (
+                              <button key={r} onClick={() => { const next = { ...filterDraft, minRating: filterDraft.minRating === r ? 0 : r }; setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1); }}
+                                className={`flex-1 py-1.5 rounded-xl text-xs font-bold border transition-all ${filterDraft.minRating === r ? 'bg-amber-400 text-white border-amber-400' : 'bg-white text-slate-600 border-slate-200'}`}>
+                                {r === 0 ? 'Bari' : `${r}★+`}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Narx</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {PRICE_PRESETS.map(p => {
+                              const active = filterDraft.minRate === String(p.min) && filterDraft.maxRate === String(p.max || '');
+                              return (
+                                <button key={p.label} onClick={() => { const next = { ...filterDraft, minRate: String(p.min), maxRate: String(p.max || '') }; setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1); }}
+                                  className={`px-2.5 py-1 rounded-full text-xs font-semibold border transition-all ${active ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-slate-600 border-slate-200'}`}>
+                                  {p.label}
+                                </button>
+                              );
+                            })}
+                          </div>
+                        </div>
+                        <div>
+                          <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Tajriba</p>
+                          <div className="flex gap-1.5">
+                            {EXP_OPTIONS.map(o => (
+                              <button key={o.value} onClick={() => { const next = { ...filterDraft, minExp: filterDraft.minExp === o.value ? 0 : o.value }; setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1); }}
+                                className={`flex-1 py-1.5 rounded-xl text-xs font-bold border transition-all ${filterDraft.minExp === o.value ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-slate-600 border-slate-200'}`}>
+                                {o.label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        <div>
+                          <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-2">Ko'nikmalar</p>
+                          <div className="flex flex-wrap gap-1.5">
+                            {Object.entries(SKILL_LABELS).map(([key, label]) => (
+                              <button key={key} onClick={() => { const next = { ...filterDraft, skill: filterDraft.skill === key ? '' : key }; setFilterDraft(next); setNannyFilter(next); setNannyPage(1); loadNannies(next, 1); }}
+                                className={`px-2.5 py-1 rounded-full text-xs font-semibold border transition-all ${filterDraft.skill === key ? 'bg-purple-600 text-white border-purple-600' : 'bg-white text-slate-600 border-slate-200'}`}>
+                                {label}
+                              </button>
+                            ))}
+                          </div>
+                        </div>
+                        {activeFilterCount > 0 && (
+                          <button onClick={resetFilter} className="w-full text-xs text-red-500 font-semibold py-2 hover:bg-red-50 rounded-xl transition-colors flex items-center justify-center gap-1.5">
+                            <RotateCcw className="w-3.5 h-3.5" /> Tozalash
+                          </button>
+                        )}
+                      </div>
+                    </motion.div>
+                  )}
+                </AnimatePresence>
+
+                {/* Active filters bar */}
+                {activeFilterCount > 0 && (
+                  <div className="mb-4 px-4 py-2.5 bg-purple-50 border border-purple-100 rounded-2xl flex items-center gap-2 flex-wrap">
+                    <span className="text-xs font-semibold text-purple-700">Faol filtrlar:</span>
+                    {filterDraft.minRating > 0 && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-amber-100 text-amber-700 rounded-full text-xs font-semibold">
+                        <Star className="w-3 h-3" /> {filterDraft.minRating}★+
+                      </span>
+                    )}
+                    {(filterDraft.minRate || filterDraft.maxRate) && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-purple-100 text-purple-700 rounded-full text-xs font-semibold">
+                        <Banknote className="w-3 h-3" /> {filterDraft.minRate || '0'} – {filterDraft.maxRate || '∞'} so'm
+                      </span>
+                    )}
+                    {filterDraft.minExp > 0 && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs font-semibold">
+                        <Award className="w-3 h-3" /> {filterDraft.minExp}+ yil
+                      </span>
+                    )}
+                    {filterDraft.skill && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-indigo-100 text-indigo-700 rounded-full text-xs font-semibold">
+                        <GraduationCap className="w-3 h-3" /> {SKILL_LABELS[filterDraft.skill] || filterDraft.skill}
+                      </span>
+                    )}
+                    {filterDraft.isVerified && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-green-100 text-green-700 rounded-full text-xs font-semibold">
+                        <BadgeCheck className="w-3 h-3" /> Tasdiqlangan
+                      </span>
+                    )}
+                    {filterDraft.ordering !== '-rating' && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-slate-100 text-slate-600 rounded-full text-xs font-semibold">
+                        <ArrowUpDown className="w-3 h-3" /> {SORT_OPTIONS.find(o => o.value === filterDraft.ordering)?.label}
+                      </span>
+                    )}
+                    {filterDraft.lat && (
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-100 text-blue-700 rounded-full text-xs font-semibold">
+                        <MapPin className="w-3 h-3" /> {filterDraft.radiusKm} km atrofida
+                      </span>
+                    )}
+                    <button onClick={resetFilter} className="ml-auto text-xs text-red-400 hover:text-red-600 font-semibold flex items-center gap-1 transition-colors">
+                      <RotateCcw className="w-3 h-3" /> Tozalash
+                    </button>
+                  </div>
+                )}
+
+                {/* Loading skeleton */}
+                {apiNanniesLoading && (
+                  <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {[...Array(9)].map((_, i) => (
+                      <div key={i} className="bg-white rounded-2xl p-4 border border-slate-100 animate-pulse">
+                        <div className="flex gap-3 mb-3">
+                          <div className="w-14 h-14 bg-slate-200 rounded-xl shrink-0" />
+                          <div className="flex-1 space-y-2 pt-1">
+                            <div className="h-4 bg-slate-200 rounded-lg w-3/4" />
+                            <div className="h-3 bg-slate-100 rounded-lg w-1/2" />
+                            <div className="h-3 bg-slate-100 rounded-lg w-2/3" />
+                          </div>
+                        </div>
+                        <div className="flex gap-1.5 mb-3">
+                          <div className="h-5 bg-slate-100 rounded-full w-16" />
+                          <div className="h-5 bg-slate-100 rounded-full w-14" />
+                        </div>
+                        <div className="h-9 bg-slate-100 rounded-xl" />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Empty state */}
+                {!apiNanniesLoading && displayNannies.length === 0 && (
+                  <div className="flex flex-col items-center justify-center py-24 text-center">
+                    <div className="w-16 h-16 bg-slate-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
+                      <Search className="w-8 h-8 text-slate-300" />
+                    </div>
+                    <p className="text-slate-800 font-bold text-lg mb-1">Enaga topilmadi</p>
+                    <p className="text-sm text-slate-400 mb-5">Filtr shartlarini o'zgartirib ko'ring</p>
+                    <button onClick={resetFilter} className="flex items-center gap-2 px-5 py-2.5 bg-purple-600 text-white text-sm font-bold rounded-xl hover:bg-purple-700 transition-colors">
+                      <RotateCcw className="w-4 h-4" /> Filtrlarni tozalash
+                    </button>
+                  </div>
+                )}
+
+                {/* Grid */}
+                {!apiNanniesLoading && displayNannies.length > 0 && (
+                  <div className="grid sm:grid-cols-2 xl:grid-cols-3 gap-4">
+                    {displayNannies.map(nanny => (
+                      <NannyCard
+                        key={nanny.id}
+                        nanny={nanny}
+                        onSelect={() => setSelectedNanny(nanny)}
+                        onBook={() => {
+                          if (!djangoUser) { setIsAuthModalOpen(true); return; }
+                          setBookingNanny(nanny);
+                        }}
+                      />
+                    ))}
+                  </div>
+                )}
+
+                {/* Pagination */}
+                {!apiNanniesLoading && totalNannies > PAGE_SIZE && (() => {
+                  const totalPages = Math.ceil(totalNannies / PAGE_SIZE);
+                  const pages: (number | '...')[] = [];
+                  if (totalPages <= 7) {
+                    for (let i = 1; i <= totalPages; i++) pages.push(i);
+                  } else {
+                    pages.push(1);
+                    if (nannyPage > 3) pages.push('...');
+                    for (let i = Math.max(2, nannyPage - 1); i <= Math.min(totalPages - 1, nannyPage + 1); i++) pages.push(i);
+                    if (nannyPage < totalPages - 2) pages.push('...');
+                    pages.push(totalPages);
+                  }
+                  return (
+                    <div className="mt-8 flex items-center justify-center gap-1.5">
+                      <button
+                        disabled={nannyPage === 1}
+                        onClick={() => goToPage(nannyPage - 1)}
+                        className="w-9 h-9 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-purple-50 hover:text-purple-700 hover:border-purple-200 disabled:opacity-30 disabled:cursor-not-allowed transition-all"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                      {pages.map((p, i) =>
+                        p === '...' ? (
+                          <span key={`dots-${i}`} className="w-9 h-9 flex items-center justify-center text-slate-400 text-sm">…</span>
+                        ) : (
+                          <button
+                            key={p}
+                            onClick={() => goToPage(p as number)}
+                            className={`w-9 h-9 rounded-xl text-sm font-semibold transition-all border ${
+                              nannyPage === p
+                                ? 'bg-purple-600 text-white border-purple-600 shadow-sm'
+                                : 'bg-white text-slate-600 border-slate-200 hover:bg-purple-50 hover:text-purple-700 hover:border-purple-200'
+                            }`}
+                          >
+                            {p}
+                          </button>
+                        )
+                      )}
+                      <button
+                        disabled={nannyPage === totalPages}
+                        onClick={() => goToPage(nannyPage + 1)}
+                        className="w-9 h-9 flex items-center justify-center rounded-xl border border-slate-200 text-slate-500 hover:bg-purple-50 hover:text-purple-700 hover:border-purple-200 disabled:opacity-30 disabled:cursor-not-allowed transition-all rotate-180"
+                      >
+                        <ChevronLeft className="w-4 h-4" />
+                      </button>
+                    </div>
+                  );
+                })()}
+
+              </div>
             </div>
-            
-            <motion.div 
-              initial={{ opacity: 0, y: 20 }}
-              whileInView={{ opacity: 1, y: 0 }}
-              viewport={{ once: true }}
-              className="mt-12 text-center"
-            >
-              <button 
-                onClick={() => setIsSearchOpen(true)}
-                className="inline-flex items-center gap-2 text-purple-600 font-semibold hover:text-purple-700 transition-colors"
-              >
-                Barcha nomzodlarni ko'rish <ArrowRight className="w-5 h-5" />
-              </button>
-            </motion.div>
           </div>
         </section>
 
@@ -1277,7 +3014,7 @@ export default function App() {
                   attribution='&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors'
                   url="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                 />
-                {MOCK_NANNIES.map((nanny) => (
+                {displayNannies.map((nanny) => (
                   nanny.coordinates && (
                     <React.Fragment key={nanny.id}>
                       <CircleMarker 
@@ -1319,70 +3056,168 @@ export default function App() {
         <section id="sharhlar" className="py-24 bg-purple-50">
           <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
             <div className="text-center max-w-3xl mx-auto mb-16">
-              <motion.h2 
+              <motion.h2
                 initial={{ opacity: 0, y: 20 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true }}
                 className="text-3xl md:text-4xl font-bold text-slate-900 mb-4 tracking-tight"
               >
-                Foydalanuvchilarimiz hikoyalari
+                Foydalanuvchilarimiz sharhlari
               </motion.h2>
-              <motion.p 
+              <motion.p
                 initial={{ opacity: 0, y: 20 }}
                 whileInView={{ opacity: 1, y: 0 }}
                 viewport={{ once: true }}
                 transition={{ delay: 0.1 }}
                 className="text-lg text-slate-600"
               >
-                Parvona orqali hayoti o'zgargan insonlar bilan tanishing.
+                Parvona orqali xizmatdan foydalangan insonlarning haqiqiy izohlari.
               </motion.p>
             </div>
 
-            <div className="grid md:grid-cols-2 gap-8">
-              {/* Nanny Testimonial */}
-              <motion.div 
-                initial={{ opacity: 0, x: -20 }}
-                whileInView={{ opacity: 1, x: 0 }}
-                viewport={{ once: true }}
-                className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 relative"
-              >
-                <div className="absolute top-8 right-8 text-purple-200">
-                  <MessageSquareQuote className="w-12 h-12" />
-                </div>
-                <div className="flex items-center gap-4 mb-6">
-                  <img src="https://i.pravatar.cc/300?img=5" alt="Dilbar" className="w-16 h-16 rounded-full object-cover" />
-                  <div>
-                    <h3 className="font-bold text-slate-900 text-lg">Dilbar, 32 yosh</h3>
-                    <p className="text-purple-600 text-sm font-medium">Professional Enaga</p>
+            {landingReviewsLoading ? (
+              /* Skeleton */
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                {[1,2,3,4,5,6].map(i => (
+                  <div key={i} className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 animate-pulse">
+                    <div className="flex items-center gap-3 mb-4">
+                      <div className="w-12 h-12 rounded-full bg-slate-200" />
+                      <div className="space-y-1.5">
+                        <div className="h-3.5 w-28 bg-slate-200 rounded-full" />
+                        <div className="h-3 w-20 bg-slate-200 rounded-full" />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="h-3 bg-slate-200 rounded-full" />
+                      <div className="h-3 bg-slate-200 rounded-full w-4/5" />
+                      <div className="h-3 bg-slate-200 rounded-full w-3/5" />
+                    </div>
                   </div>
-                </div>
-                <p className="text-slate-600 italic">
-                  "Parvona Akademiyasida o'qib, o'z malakamni oshirdim. Hozirda o'zimga qulay vaqtda, ishonchli oilalarda ishlayapman. Daromadim 2 barobar oshdi va eng muhimi, mehnatim qadrlanayotganini his qilyapman."
-                </p>
-              </motion.div>
+                ))}
+              </div>
+            ) : landingReviews.length > 0 ? (
+              <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
+                {landingReviews.map((review, idx) => {
+                  const initials = review.author.name
+                    .split(' ')
+                    .map(w => w[0])
+                    .join('')
+                    .slice(0, 2)
+                    .toUpperCase();
+                  const gradients = [
+                    'from-purple-500 to-indigo-600',
+                    'from-sky-500 to-blue-600',
+                    'from-emerald-500 to-teal-600',
+                    'from-rose-500 to-pink-600',
+                    'from-amber-500 to-orange-600',
+                    'from-violet-500 to-purple-600',
+                  ];
+                  const grad = gradients[idx % gradients.length];
+                  return (
+                    <motion.div
+                      key={review.id}
+                      initial={{ opacity: 0, y: 16 }}
+                      whileInView={{ opacity: 1, y: 0 }}
+                      viewport={{ once: true }}
+                      transition={{ delay: idx * 0.07 }}
+                      className="bg-white rounded-3xl p-6 shadow-sm border border-slate-100 relative flex flex-col"
+                    >
+                      {/* Quote icon */}
+                      <MessageSquareQuote className="absolute top-5 right-5 w-8 h-8 text-purple-100" />
 
-              {/* Parent Testimonial */}
-              <motion.div 
-                initial={{ opacity: 0, x: 20 }}
-                whileInView={{ opacity: 1, x: 0 }}
-                viewport={{ once: true }}
-                className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 relative"
-              >
-                <div className="absolute top-8 right-8 text-sky-200">
-                  <MessageSquareQuote className="w-12 h-12" />
-                </div>
-                <div className="flex items-center gap-4 mb-6">
-                  <img src="https://i.pravatar.cc/300?img=1" alt="Aysel" className="w-16 h-16 rounded-full object-cover" />
-                  <div>
-                    <h3 className="font-bold text-slate-900 text-lg">Aysel, 28 yosh</h3>
-                    <p className="text-sky-600 text-sm font-medium">Yosh Ona</p>
+                      {/* Stars */}
+                      <div className="flex gap-0.5 mb-4">
+                        {Array.from({ length: 5 }).map((_, i) => (
+                          <Star
+                            key={i}
+                            className={`w-4 h-4 ${i < review.rating ? 'fill-amber-400 text-amber-400' : 'text-slate-200'}`}
+                          />
+                        ))}
+                      </div>
+
+                      {/* Text */}
+                      <p className="text-slate-600 text-sm leading-relaxed flex-1 mb-5 line-clamp-4">
+                        "{review.text}"
+                      </p>
+
+                      {/* Author + nanny */}
+                      <div className="flex items-center gap-3 pt-4 border-t border-slate-100">
+                        {review.author.photo ? (
+                          <img
+                            src={review.author.photo}
+                            alt={review.author.name}
+                            className="w-10 h-10 rounded-full object-cover shrink-0"
+                          />
+                        ) : (
+                          <div className={`w-10 h-10 rounded-full bg-gradient-to-br ${grad} flex items-center justify-center text-white text-xs font-bold shrink-0`}>
+                            {initials}
+                          </div>
+                        )}
+                        <div className="min-w-0">
+                          <p className="text-sm font-semibold text-slate-900 truncate">
+                            {review.author.name}
+                          </p>
+                          <p className="text-xs text-slate-500 truncate">
+                            {review.author.role === 'parent' ? 'Ota-ona' : 'Enaga'} · {review.target.name} haqida
+                          </p>
+                        </div>
+                      </div>
+                    </motion.div>
+                  );
+                })}
+              </div>
+            ) : (
+              /* Fallback: static cards */
+              <div className="grid md:grid-cols-2 gap-8">
+                <motion.div
+                  initial={{ opacity: 0, x: -20 }}
+                  whileInView={{ opacity: 1, x: 0 }}
+                  viewport={{ once: true }}
+                  className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 relative"
+                >
+                  <div className="absolute top-8 right-8 text-purple-200">
+                    <MessageSquareQuote className="w-12 h-12" />
                   </div>
-                </div>
-                <p className="text-slate-600 italic">
-                  "Farzandim uchun ishonchli enaga topish juda qiyin edi. Parvona orqali video-intervyularni ko'rib, o'zimizga eng mos enagani topdik. GPS kuzatuv va xavfsiz to'lov tizimi menga xotirjamlik beradi."
-                </p>
-              </motion.div>
-            </div>
+                  <div className="flex items-center gap-4 mb-6">
+                    <div className="w-16 h-16 rounded-full bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center text-white font-bold text-xl">D</div>
+                    <div>
+                      <h3 className="font-bold text-slate-900 text-lg">Dilbar, 32 yosh</h3>
+                      <p className="text-purple-600 text-sm font-medium">Professional Enaga</p>
+                    </div>
+                  </div>
+                  <div className="flex gap-0.5 mb-3">
+                    {[1,2,3,4,5].map(i => <Star key={i} className="w-4 h-4 fill-amber-400 text-amber-400" />)}
+                  </div>
+                  <p className="text-slate-600 italic">
+                    "Parvona orqali ishonchli oilalarda ishlayapman. Daromadim 2 barobar oshdi va mehnatim qadrlanayotganini his qilyapman."
+                  </p>
+                </motion.div>
+
+                <motion.div
+                  initial={{ opacity: 0, x: 20 }}
+                  whileInView={{ opacity: 1, x: 0 }}
+                  viewport={{ once: true }}
+                  className="bg-white p-8 rounded-3xl shadow-sm border border-slate-100 relative"
+                >
+                  <div className="absolute top-8 right-8 text-sky-200">
+                    <MessageSquareQuote className="w-12 h-12" />
+                  </div>
+                  <div className="flex items-center gap-4 mb-6">
+                    <div className="w-16 h-16 rounded-full bg-gradient-to-br from-sky-500 to-blue-600 flex items-center justify-center text-white font-bold text-xl">A</div>
+                    <div>
+                      <h3 className="font-bold text-slate-900 text-lg">Aysel, 28 yosh</h3>
+                      <p className="text-sky-600 text-sm font-medium">Yosh Ona</p>
+                    </div>
+                  </div>
+                  <div className="flex gap-0.5 mb-3">
+                    {[1,2,3,4,5].map(i => <Star key={i} className="w-4 h-4 fill-amber-400 text-amber-400" />)}
+                  </div>
+                  <p className="text-slate-600 italic">
+                    "Parvona orqali o'zimizga eng mos enagani topdik. Xavfsiz to'lov tizimi menga xotirjamlik beradi."
+                  </p>
+                </motion.div>
+              </div>
+            )}
           </div>
         </section>
 
@@ -1610,133 +3445,9 @@ export default function App() {
             </motion.div>
           </div>
         </section>
-          </>
-        )}
+        </>
       </main>
 
-      {/* Search Nannies Modal */}
-      <AnimatePresence>
-        {isSearchOpen && (
-          <motion.div 
-            initial={{ opacity: 0 }}
-            animate={{ opacity: 1 }}
-            exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[60] bg-slate-900/40 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6"
-          >
-            <motion.div 
-              initial={{ scale: 0.95, opacity: 0 }}
-              animate={{ scale: 1, opacity: 1 }}
-              exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-white rounded-3xl shadow-2xl w-full max-w-5xl max-h-[90vh] flex flex-col overflow-hidden"
-            >
-              <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-white sticky top-0 z-10">
-                <div>
-                  <h2 className="text-2xl font-bold text-slate-900">Enaga izlash</h2>
-                  <p className="text-sm text-slate-500">Navoiy shahri bo'yicha eng yaxshi nomzodlar</p>
-                </div>
-                <button 
-                  onClick={() => setIsSearchOpen(false)}
-                  className="p-2 hover:bg-slate-100 rounded-full transition-colors"
-                >
-                  <X className="w-6 h-6 text-slate-500" />
-                </button>
-              </div>
-              
-              <div className="p-6 overflow-y-auto bg-slate-50 flex-1">
-                <div className="flex items-center gap-4 mb-6">
-                  <div className="flex-1 relative">
-                    <Search className="w-5 h-5 text-slate-400 absolute left-4 top-1/2 -translate-y-1/2" />
-                    <input 
-                      type="text" 
-                      placeholder="Ism, ko'nikma yoki xizmat turi bo'yicha qidirish..." 
-                      className="w-full pl-12 pr-4 py-3 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-purple-500 focus:border-transparent"
-                    />
-                  </div>
-                  <button className="p-3 bg-white border border-slate-200 rounded-xl text-slate-600 hover:bg-slate-50 flex items-center gap-2">
-                    <Filter className="w-5 h-5" />
-                    <span className="hidden sm:inline">Filtrlar</span>
-                  </button>
-                </div>
-
-                <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-6">
-                  {MOCK_NANNIES.map((nanny) => (
-                    <motion.div 
-                      key={nanny.id}
-                      whileHover={{ y: -4 }}
-                      className="bg-white rounded-2xl p-5 border border-slate-100 shadow-sm hover:shadow-md transition-all cursor-pointer"
-                      onClick={() => setSelectedNanny(nanny)}
-                    >
-                      <div className="flex items-start gap-4 mb-4">
-                        <div className="relative group/avatar">
-                          <img src={nanny.imageUrl} alt={nanny.name} className="w-16 h-16 rounded-full object-cover" />
-                          <div className="absolute inset-0 bg-black/40 rounded-full opacity-0 group-hover/avatar:opacity-100 transition-opacity flex items-center justify-center">
-                            <Play className="w-6 h-6 text-white ml-0.5" />
-                          </div>
-                          <div className="absolute -bottom-1 -right-1 bg-green-500 w-4 h-4 rounded-full border-2 border-white"></div>
-                        </div>
-                        <div className="flex-1">
-                          <div className="flex justify-between items-start">
-                            <h3 className="font-bold text-slate-900">{nanny.name}</h3>
-                            <div className="flex items-center gap-1 text-xs font-medium text-purple-600 bg-purple-50 px-2 py-0.5 rounded-full">
-                              <Video className="w-3 h-3" />
-                              Video
-                            </div>
-                          </div>
-                          <div className="flex items-center gap-1 text-sm text-amber-500 font-medium mt-1">
-                            <Star className="w-4 h-4 fill-amber-500" />
-                            {nanny.rating} <span className="text-slate-400 font-normal">({nanny.reviews} sharh)</span>
-                          </div>
-                          <p className="text-xs text-slate-500 mt-1 mb-3">{nanny.experience} tajriba • {nanny.age} yosh</p>
-                          
-                          {/* Badges */}
-                          <div className="flex flex-wrap gap-2">
-                            {nanny.badges.map((badge, idx) => (
-                              <span key={idx} className="flex items-center gap-1 text-[11px] font-bold text-slate-700 bg-amber-50/80 border border-amber-200/50 px-2 py-1 rounded-md">
-                                {badge.icon === 'heart' && <Heart className="w-3 h-3 text-rose-500" />}
-                                {badge.icon === 'palette' && <Palette className="w-3 h-3 text-indigo-500" />}
-                                {badge.icon === 'sparkles' && <Sparkles className="w-3 h-3 text-amber-500" />}
-                                {!['heart', 'palette', 'sparkles'].includes(badge.icon) && <Award className="w-3 h-3 text-amber-500" />}
-                                {badge.label}
-                              </span>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="flex flex-wrap gap-2 mb-4">
-                        {nanny.skills.slice(0, 2).map((skill, idx) => (
-                          <span key={idx} className="px-2 py-1 bg-purple-50 text-purple-700 rounded-md text-xs font-medium">
-                            {skill}
-                          </span>
-                        ))}
-                        {nanny.skills.length > 2 && (
-                          <span className="px-2 py-1 bg-slate-50 text-slate-600 rounded-md text-xs font-medium">
-                            +{nanny.skills.length - 2}
-                          </span>
-                        )}
-                      </div>
-                      <div className="flex items-center justify-between pt-4 border-t border-slate-100">
-                        <span className="font-bold text-slate-900">{nanny.hourlyRate}<span className="text-xs text-slate-500 font-normal">/soat</span></span>
-                        <div className="flex items-center gap-2">
-                          <button 
-                            onClick={(e) => { e.stopPropagation(); /* Add booking logic */ }}
-                            className="text-sm font-semibold text-purple-600 bg-purple-50 hover:bg-purple-100 px-3 py-1.5 rounded-lg flex items-center gap-1 transition-colors"
-                          >
-                            <Calendar className="w-4 h-4" />
-                            Sinov
-                          </button>
-                          <button className="text-sm font-semibold text-slate-600 hover:text-purple-700 flex items-center gap-1">
-                            Profil <ArrowRight className="w-4 h-4" />
-                          </button>
-                        </div>
-                      </div>
-                    </motion.div>
-                  ))}
-                </div>
-              </div>
-            </motion.div>
-          </motion.div>
-        )}
-      </AnimatePresence>
 
       {/* Nanny Profile Modal with Video Interview */}
       <AnimatePresence>
@@ -1816,34 +3527,80 @@ export default function App() {
 
                   {/* Reviews Section */}
                   <div className="pt-8 border-t border-slate-100">
-                    <h3 className="text-xl font-bold text-slate-900 mb-6">Ota-onalar sharhlari</h3>
-                    <div className="space-y-6">
-                      {selectedNanny.reviewsList?.map((review, idx) => (
-                        <div key={idx} className="bg-slate-50 rounded-2xl p-6">
-                          <div className="flex justify-between items-start mb-4">
-                            <div>
-                              <h4 className="font-bold text-slate-900">{review.author}</h4>
-                              <p className="text-sm text-slate-500">{review.date}</p>
+                    <h3 className="text-xl font-bold text-slate-900 mb-6">
+                      Ota-onalar sharhlari
+                      {selectedNannyReviews.length > 0 && (
+                        <span className="ml-2 text-sm font-normal text-slate-500">({selectedNannyReviews.length} ta)</span>
+                      )}
+                    </h3>
+                    {reviewsLoading ? (
+                      <div className="space-y-4">
+                        {[1, 2].map(i => (
+                          <div key={i} className="bg-slate-50 rounded-2xl p-6 animate-pulse">
+                            <div className="flex justify-between mb-3">
+                              <div className="h-4 bg-slate-200 rounded w-32" />
+                              <div className="h-4 bg-slate-200 rounded w-20" />
                             </div>
-                            <div className="flex items-center gap-1">
-                              {[...Array(review.rating)].map((_, i) => (
-                                <Star key={i} className="w-4 h-4 fill-amber-500 text-amber-500" />
-                              ))}
-                            </div>
+                            <div className="h-3 bg-slate-100 rounded w-full mb-2" />
+                            <div className="h-3 bg-slate-100 rounded w-3/4" />
                           </div>
-                          <p className="text-slate-700 mb-4">{review.text}</p>
-                          {review.badges && review.badges.length > 0 && (
-                            <div className="flex gap-2">
-                              {review.badges.map((badge, i) => (
-                                <span key={i} className="text-xs font-semibold text-amber-700 bg-amber-100/50 px-2 py-1 rounded-md border border-amber-200/50">
-                                  {badge}
-                                </span>
-                              ))}
+                        ))}
+                      </div>
+                    ) : selectedNannyReviews.length > 0 ? (
+                      <div className="space-y-6">
+                        {selectedNannyReviews.map((review: Review) => (
+                          <div key={review.id} className="bg-slate-50 rounded-2xl p-6">
+                            <div className="flex justify-between items-start mb-3">
+                              <div className="flex items-center gap-3">
+                                <div className="w-10 h-10 rounded-full bg-purple-100 flex items-center justify-center font-bold text-purple-700 text-sm">
+                                  {review.author.name.charAt(0)}
+                                </div>
+                                <div>
+                                  <h4 className="font-bold text-slate-900 text-sm">{review.author.name}</h4>
+                                  <p className="text-xs text-slate-500">
+                                    {new Date(review.created_at).toLocaleDateString('uz-UZ')}
+                                  </p>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-0.5">
+                                {[...Array(review.rating)].map((_, i) => (
+                                  <Star key={i} className="w-4 h-4 fill-amber-500 text-amber-500" />
+                                ))}
+                                {[...Array(5 - review.rating)].map((_, i) => (
+                                  <Star key={i} className="w-4 h-4 text-slate-300" />
+                                ))}
+                              </div>
                             </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
+                            <p className="text-slate-700 leading-relaxed">{review.text}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : selectedNanny.reviewsList && selectedNanny.reviewsList.length > 0 ? (
+                      // Mock reviews for demo nannies
+                      <div className="space-y-6">
+                        {selectedNanny.reviewsList.map((review, idx) => (
+                          <div key={idx} className="bg-slate-50 rounded-2xl p-6">
+                            <div className="flex justify-between items-start mb-3">
+                              <div>
+                                <h4 className="font-bold text-slate-900">{review.author}</h4>
+                                <p className="text-xs text-slate-500">{review.date}</p>
+                              </div>
+                              <div className="flex items-center gap-0.5">
+                                {[...Array(review.rating)].map((_, i) => (
+                                  <Star key={i} className="w-4 h-4 fill-amber-500 text-amber-500" />
+                                ))}
+                              </div>
+                            </div>
+                            <p className="text-slate-700">{review.text}</p>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="text-center py-8 text-slate-400">
+                        <Star className="w-8 h-8 mx-auto mb-2 opacity-30" />
+                        <p className="text-sm">Hali sharhlar yo'q</p>
+                      </div>
+                    )}
                   </div>
                 </div>
 
@@ -1853,7 +3610,14 @@ export default function App() {
                     <div className="flex items-center gap-5 mb-6">
                       <img src={selectedNanny.imageUrl} alt={selectedNanny.name} className="w-24 h-24 rounded-full object-cover border-4 border-purple-50" />
                       <div>
-                        <h2 className="text-2xl font-bold text-slate-900">{selectedNanny.name}</h2>
+                        <div className="flex items-center gap-2 mb-0.5">
+                          <h2 className="text-2xl font-bold text-slate-900">{selectedNanny.name}</h2>
+                          {selectedNanny.isPro && (
+                            <span className="flex items-center gap-1 px-2 py-0.5 bg-gradient-to-r from-amber-400 to-orange-500 rounded-full text-xs font-bold text-white">
+                              <Crown className="w-3 h-3" /> Pro
+                            </span>
+                          )}
+                        </div>
                         <div className="flex items-center gap-2 text-amber-500 font-medium mt-1">
                           <Star className="w-5 h-5 fill-amber-500" />
                           <span className="text-lg">{selectedNanny.rating}</span>
@@ -1905,15 +3669,35 @@ export default function App() {
                       </div>
                     </div>
 
-                    <button className="w-full bg-purple-600 hover:bg-purple-700 text-white py-4 rounded-xl text-lg font-bold transition-colors shadow-lg shadow-purple-200 mb-3 flex items-center justify-center gap-2">
+                    <button
+                      onClick={() => {
+                        if (!djangoUser) { setIsAuthModalOpen(true); return; }
+                        setBookingNanny(selectedNanny);
+                      }}
+                      className="w-full bg-purple-600 hover:bg-purple-700 text-white py-4 rounded-xl text-lg font-bold transition-colors shadow-lg shadow-purple-200 mb-3 flex items-center justify-center gap-2"
+                    >
                       <Calendar className="w-5 h-5" />
                       Sinov uchrashuvini belgilash
                     </button>
                     <div className="grid grid-cols-2 gap-3 mb-4">
-                      <button className="w-full bg-purple-50 hover:bg-purple-100 text-purple-700 py-3 rounded-xl font-bold transition-colors">
+                      <button
+                        onClick={() => {
+                          if (!djangoUser) { setIsAuthModalOpen(true); return; }
+                          setSelectedNanny(null);
+                          navigate('/dashboard/messages');
+                        }}
+                        className="w-full bg-purple-50 hover:bg-purple-100 text-purple-700 py-3 rounded-xl font-bold transition-colors"
+                      >
                         Suhbatga chorlash
                       </button>
-                      <button className="w-full bg-white border-2 border-slate-200 hover:border-purple-200 hover:bg-purple-50 text-slate-700 py-3 rounded-xl font-bold transition-colors">
+                      <button
+                        onClick={() => {
+                          if (!djangoUser) { setIsAuthModalOpen(true); return; }
+                          setSelectedNanny(null);
+                          navigate('/dashboard/messages');
+                        }}
+                        className="w-full bg-white border-2 border-slate-200 hover:border-purple-200 hover:bg-purple-50 text-slate-700 py-3 rounded-xl font-bold transition-colors"
+                      >
                         Xabar yozish
                       </button>
                     </div>
@@ -1933,7 +3717,7 @@ export default function App() {
       {/* Mobile Fixed Bottom Panel */}
       <div className="md:hidden fixed bottom-0 left-0 right-0 bg-white border-t border-slate-200 p-4 z-40 shadow-[0_-4px_6px_-1px_rgba(0,0,0,0.05)]">
         <button 
-          onClick={() => setIsSearchOpen(true)}
+          onClick={() => document.getElementById("enagalar")?.scrollIntoView({ behavior: "smooth" })}
           className="w-full bg-purple-600 hover:bg-purple-700 text-white px-6 py-3.5 rounded-xl text-base font-semibold transition-all shadow-lg shadow-purple-200 flex items-center justify-center gap-2 group"
         >
           <Search className="w-5 h-5" />
@@ -1962,56 +3746,186 @@ export default function App() {
           </div>
         </div>
       </footer>
-      {/* Auth Modal */}
+      {/* Booking Modal */}
       <AnimatePresence>
-        {isAuthModalOpen && (
-          <motion.div 
+        {bookingNanny && (
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[80] bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4"
+            className="fixed inset-0 z-[75] bg-slate-900/50 backdrop-blur-sm flex items-center justify-center p-4"
           >
-            <motion.div 
+            <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
               className="bg-white rounded-3xl p-8 max-w-md w-full shadow-2xl relative"
             >
-              <button 
-                onClick={() => setIsAuthModalOpen(false)}
-                className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 bg-slate-100 p-2 rounded-full transition-colors"
+              <button
+                onClick={() => { setBookingNanny(null); setBookingError(''); setBookingSuccess(false); }}
+                className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 bg-slate-100 p-2 rounded-full"
               >
                 <X className="w-5 h-5" />
               </button>
-              
-              <div className="text-center mb-8">
-                <div className="w-16 h-16 bg-purple-100 rounded-2xl flex items-center justify-center mx-auto mb-4">
-                  <HeartHandshake className="w-8 h-8 text-purple-600" />
-                </div>
-                <h2 className="text-2xl font-bold text-slate-900 mb-2">Xush kelibsiz!</h2>
-                <p className="text-slate-600">Parvona platformasiga kirish uchun davom eting</p>
-              </div>
 
-              <button 
-                onClick={handleLogin}
-                className="w-full bg-white border-2 border-slate-200 hover:border-purple-300 hover:bg-purple-50 text-slate-700 py-3.5 rounded-xl font-semibold transition-all flex items-center justify-center gap-3"
-              >
-                <svg className="w-5 h-5" viewBox="0 0 24 24">
-                  <path d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z" fill="#4285F4"/>
-                  <path d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z" fill="#34A853"/>
-                  <path d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z" fill="#FBBC05"/>
-                  <path d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z" fill="#EA4335"/>
-                </svg>
-                Google orqali kirish
-              </button>
-              
-              <p className="text-xs text-center text-slate-500 mt-6">
-                Tizimga kirish orqali siz Parvona platformasining <a href="#" className="text-purple-600 hover:underline">Foydalanish shartlari</a> va <a href="#" className="text-purple-600 hover:underline">Maxfiylik siyosatiga</a> rozilik bildirasiz.
-              </p>
+              {bookingSuccess ? (
+                <div className="text-center py-8">
+                  <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                    <CheckCircle2 className="w-8 h-8 text-green-600" />
+                  </div>
+                  <h3 className="text-xl font-bold text-slate-900 mb-2">Buyurtma yuborildi!</h3>
+                  <p className="text-slate-600">Enaga tasdiqlashini kuting.</p>
+                </div>
+              ) : (
+                <>
+                  <div className="flex items-center gap-4 mb-6">
+                    <img src={bookingNanny.imageUrl} alt={bookingNanny.name} className="w-16 h-16 rounded-full object-cover" />
+                    <div>
+                      <h2 className="text-xl font-bold text-slate-900">{bookingNanny.name}</h2>
+                      <p className="text-purple-600 font-medium">{bookingNanny.hourlyRate}/soat</p>
+                    </div>
+                  </div>
+
+                  {/* Sinov darsi toggle */}
+                  <button
+                    onClick={() => setBookingForm(f => ({ ...f, is_trial: !f.is_trial }))}
+                    className={`w-full flex items-center justify-between p-4 rounded-2xl border-2 transition-all mb-4 ${
+                      bookingForm.is_trial
+                        ? 'border-amber-400 bg-amber-50'
+                        : 'border-slate-200 bg-white hover:border-amber-300'
+                    }`}
+                  >
+                    <div className="flex items-center gap-3">
+                      <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${bookingForm.is_trial ? 'bg-amber-100' : 'bg-slate-100'}`}>
+                        <Star className={`w-5 h-5 ${bookingForm.is_trial ? 'text-amber-500 fill-amber-500' : 'text-slate-400'}`} />
+                      </div>
+                      <div className="text-left">
+                        <p className={`text-sm font-bold ${bookingForm.is_trial ? 'text-amber-800' : 'text-slate-700'}`}>Sinov darsi</p>
+                        <p className="text-xs text-slate-500">1 soat • 50% chegirma</p>
+                      </div>
+                    </div>
+                    <div className={`w-5 h-5 rounded-full border-2 flex items-center justify-center ${bookingForm.is_trial ? 'border-amber-400 bg-amber-400' : 'border-slate-300'}`}>
+                      {bookingForm.is_trial && <CheckCircle2 className="w-3 h-3 text-white" />}
+                    </div>
+                  </button>
+
+                  <div className="space-y-4">
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">Boshlanish sanasi</label>
+                        <input
+                          type="date"
+                          value={bookingForm.start_date}
+                          min={new Date().toISOString().split('T')[0]}
+                          onChange={e => setBookingForm(f => ({ ...f, start_date: e.target.value }))}
+                          className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-sm font-medium text-slate-700 mb-1">Tugash sanasi</label>
+                        <input
+                          type="date"
+                          value={bookingForm.end_date}
+                          min={bookingForm.start_date || new Date().toISOString().split('T')[0]}
+                          onChange={e => setBookingForm(f => ({ ...f, end_date: e.target.value }))}
+                          className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Kunlik soat soni</label>
+                      <select
+                        value={bookingForm.hours_per_day}
+                        onChange={e => setBookingForm(f => ({ ...f, hours_per_day: Number(e.target.value) }))}
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400"
+                      >
+                        {[2, 3, 4, 5, 6, 7, 8].map(h => <option key={h} value={h}>{h} soat</option>)}
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Manzil</label>
+                      <input
+                        type="text"
+                        value={bookingForm.address}
+                        onChange={e => setBookingForm(f => ({ ...f, address: e.target.value }))}
+                        placeholder="Uy manzilingizni kiriting"
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-sm font-medium text-slate-700 mb-1">Izoh (ixtiyoriy)</label>
+                      <textarea
+                        value={bookingForm.notes}
+                        onChange={e => setBookingForm(f => ({ ...f, notes: e.target.value }))}
+                        placeholder="Maxsus talablar, bolaning yoshi..."
+                        rows={3}
+                        className="w-full border border-slate-200 rounded-xl px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-purple-400 resize-none"
+                      />
+                    </div>
+                  </div>
+
+                  {bookingError && (
+                    <div className="mt-4 p-3 bg-red-50 text-red-600 rounded-xl text-sm flex items-start gap-2">
+                      <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+                      {bookingError}
+                    </div>
+                  )}
+
+                  <button
+                    onClick={handleCreateBooking}
+                    disabled={bookingLoading || !bookingForm.start_date || !bookingForm.end_date || !bookingForm.address}
+                    className="mt-6 w-full bg-purple-600 hover:bg-purple-700 disabled:bg-slate-300 disabled:cursor-not-allowed text-white py-3.5 rounded-xl font-bold transition-colors flex items-center justify-center gap-2"
+                  >
+                    {bookingLoading ? 'Yuklanmoqda...' : (
+                      <><Calendar className="w-5 h-5" /> Buyurtma yuborish</>
+                    )}
+                  </button>
+                </>
+              )}
             </motion.div>
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Auth Modal */}
+      <AuthModal
+        isOpen={isAuthModalOpen}
+        onClose={() => { setIsAuthModalOpen(false); clearError(); }}
+        onGoogleLogin={handleLogin}
+        onTelegramLogin={handleTelegramLogin}
+        onEmailLogin={async (email, password) => {
+          await loginWithEmail(email, password);
+          clearAuthFlow();
+          setIsAuthModalOpen(false);
+          const { role } = useAuthStore.getState();
+          navigate(role === 'admin' ? '/admin' : '/dashboard');
+        }}
+        onEmailOTPLogin={async (email, otp, role) => {
+          await loginWithEmailOTP(email, otp, role);
+          clearAuthFlow();
+          setIsAuthModalOpen(false);
+          const { role: userRole } = useAuthStore.getState();
+          navigate(userRole === 'admin' ? '/admin' : '/dashboard');
+        }}
+        onRegisterComplete={async (email, otp) => {
+          await completeRegister(email, otp);
+          clearAuthFlow();
+          setIsAuthModalOpen(false);
+          navigate('/dashboard');
+        }}
+        onRegisterTelegramComplete={async (reg_token, otp) => {
+          await completeTelegramRegister(reg_token, otp);
+          clearAuthFlow();
+          setIsAuthModalOpen(false);
+          navigate('/dashboard');
+        }}
+        authLoading={authLoading}
+        authError={authError}
+        clearError={clearError}
+      />
 
       {/* Role Selection Modal */}
       <AnimatePresence>
