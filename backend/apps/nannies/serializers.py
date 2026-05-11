@@ -7,7 +7,7 @@ VALID_SKILLS = [s.value for s in NannySkill]
 
 
 class NannyProfileSerializer(serializers.ModelSerializer):
-    """Ro'yxat uchun — qisqa."""
+    """Royxat uchun - bio va video_url ham kiradi."""
     from django.utils import timezone as _tz
 
     user        = UserSerializer(read_only=True)
@@ -26,6 +26,7 @@ class NannyProfileSerializer(serializers.ModelSerializer):
         model  = NannyProfile
         fields = [
             'id', 'user', 'age', 'experience', 'hourly_rate',
+            'bio', 'video_url',
             'skills', 'location_name', 'latitude', 'longitude',
             'rating', 'reviews_count', 'is_verified', 'is_pro', 'status',
             'distance_km', 'created_at',
@@ -37,13 +38,13 @@ class NannyProfileSerializer(serializers.ModelSerializer):
 
 
 class NannyProfileDetailSerializer(NannyProfileSerializer):
-    """Detail sahifa uchun — bio va video ham bor."""
+    """Detail sahifa uchun - barcha maydonlar."""
     class Meta(NannyProfileSerializer.Meta):
-        fields = NannyProfileSerializer.Meta.fields + ['bio', 'video_url', 'updated_at']
+        fields = NannyProfileSerializer.Meta.fields + ['updated_at']
 
 
 class NannyProfileWriteSerializer(serializers.ModelSerializer):
-    """Nanya o'z profilini yaratish/yangilash uchun."""
+    """Nanya oz profilini yaratish/yangilash uchun."""
     class Meta:
         model  = NannyProfile
         fields = [
@@ -54,15 +55,15 @@ class NannyProfileWriteSerializer(serializers.ModelSerializer):
 
     def validate_skills(self, value):
         if not isinstance(value, list):
-            raise serializers.ValidationError('Ko\'nikmalar ro\'yxat bo\'lishi kerak.')
+            raise serializers.ValidationError("Konikmalar royxat bolishi kerak.")
         invalid = [s for s in value if s not in VALID_SKILLS]
         if invalid:
-            raise serializers.ValidationError(f'Noto\'g\'ri ko\'nikmalar: {invalid}')
+            raise serializers.ValidationError(f"Notogri konikmalar: {invalid}")
         return value
 
     def validate_hourly_rate(self, value):
         if value < 10_000:
-            raise serializers.ValidationError('Minimal soatlik narx 10,000 so\'m.')
+            raise serializers.ValidationError("Minimal soatlik narx 10,000 som.")
         return value
 
 
@@ -78,5 +79,5 @@ class NannyAvailabilitySerializer(serializers.ModelSerializer):
 
 
 class NannyAvailabilityWriteSerializer(serializers.Serializer):
-    """Bulk upsert: [{date, status}, ...]"""
+    """Bulk upsert: [{date,status}, ...]"""
     items = NannyAvailabilitySerializer(many=True)

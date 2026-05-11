@@ -42,7 +42,7 @@ class NannyListView(generics.ListAPIView):
             status='active',
             is_verified=True,
         ).select_related('user').only(
-            'id', 'age', 'experience', 'hourly_rate', 'skills',
+            'id', 'age', 'experience', 'hourly_rate', 'bio', 'video_url', 'skills',
             'location_name', 'latitude', 'longitude',
             'rating', 'reviews_count', 'is_verified', 'status', 'created_at',
             'user__id', 'user__name', 'user__photo',
@@ -67,7 +67,7 @@ class NannyListView(generics.ListAPIView):
 
         queryset = self.filter_queryset(self.get_queryset())
 
-        # Geo filter — agar lat/lon berilgan bo'lsa
+        # Geo filter ? agar lat/lon berilgan bo'lsa
         lat = request.query_params.get('lat')
         lon = request.query_params.get('lon')
         if lat and lon:
@@ -78,7 +78,7 @@ class NannyListView(generics.ListAPIView):
         if page is not None:
             serializer = self.get_serializer(page, many=True)
             response   = self.get_paginated_response(serializer.data)
-            # response.data — paginated dict: {count, next, previous, results}
+            # response.data ? paginated dict: {count, next, previous, results}
             cache.set(cache_key, response.data, timeout=300)
             return response
 
@@ -101,7 +101,7 @@ class NannyDetailView(generics.RetrieveAPIView):
         if cached is not None:
             return Response(cached)
         response = super().retrieve(request, *args, **kwargs)
-        # response.data — serializer dict (renderer wraps it later)
+        # response.data ? serializer dict (renderer wraps it later)
         cache.set(cache_key, response.data, timeout=600)
         return response
 
@@ -146,7 +146,7 @@ class MyNannyProfileView(generics.RetrieveUpdateAPIView):
         return super().partial_update(request, *args, **kwargs)
 
 
-# ─── Admin views ─────────────────────────────────────────────────────────────
+# ??? Admin views ?????????????????????????????????????????????????????????????
 
 class AdminNannyListView(generics.ListAPIView):
     """Admin: barcha enaga profillari."""
@@ -190,15 +190,15 @@ class AdminVerifyNannyView(APIView):
             if profile.is_verified:
                 _tg_notify(
                     profile.user,
-                    '✅ Profilingiz tasdiqlandi!',
+                    '? Profilingiz tasdiqlandi!',
                     f'Salom, *{profile.user.name}*!\n'
                     f'Sizning Parvona enaga profilingiz admin tomonidan tasdiqlandi.\n'
-                    f'Endi ota-onalar sizni ko\'rishi mumkin. 🎉',
+                    f'Endi ota-onalar sizni ko\'rishi mumkin. ??',
                 )
             else:
                 _tg_notify(
                     profile.user,
-                    '⚠️ Profil tasdiqdan o\'chirildi',
+                    '?? Profil tasdiqdan o\'chirildi',
                     f'Salom, *{profile.user.name}*!\n'
                     f'Sizning profil tasdiqingiz olib tashlandi.\n'
                     f'Batafsil ma\'lumot uchun saytga kiring yoki admin bilan bog\'laning.',
@@ -216,7 +216,7 @@ class AdminVerifyNannyView(APIView):
 class NannyAvailabilityView(APIView):
     """
     GET  /api/nannies/me/availability/?year=2026&month=4
-    POST /api/nannies/me/availability/  — bulk upsert {items:[{date,status},...]}
+    POST /api/nannies/me/availability/  ? bulk upsert {items:[{date,status},...]}
     """
     permission_classes = [IsNanny]
 
@@ -236,7 +236,7 @@ class NannyAvailabilityView(APIView):
         items = ser.validated_data['items']
         for item in items:
             if item['status'] == 'available':
-                # delete row — available is the default (no row = available)
+                # delete row ? available is the default (no row = available)
                 NannyAvailability.objects.filter(
                     nanny=request.user, date=item['date']
                 ).delete()
@@ -252,7 +252,7 @@ class NannyAvailabilityView(APIView):
 class NannyAvailabilityPublicView(generics.ListAPIView):
     """
     GET /api/nannies/<id>/availability/?year=2026&month=4
-    Parent uchun — faqat band/tatil kunlar qaytariladi.
+    Parent uchun ? faqat band/tatil kunlar qaytariladi.
     """
     permission_classes = []
     serializer_class   = NannyAvailabilitySerializer
@@ -284,10 +284,10 @@ class AdminVerifyNannyPostView(APIView):
             from apps.notifications.tasks import _tg_notify
             _tg_notify(
                 profile.user,
-                '✅ Profilingiz tasdiqlandi!',
+                '? Profilingiz tasdiqlandi!',
                 f'Salom, *{profile.user.name}*!\n'
                 f'Sizning Parvona enaga profilingiz tasdiqlandi.\n'
-                f'Endi ota-onalar sizni ko\'rishi mumkin. 🎉',
+                f'Endi ota-onalar sizni ko\'rishi mumkin. ??',
             )
         except Exception:
             pass
@@ -310,7 +310,7 @@ class AdminUnverifyNannyView(APIView):
             from apps.notifications.tasks import _tg_notify
             _tg_notify(
                 profile.user,
-                '⚠️ Profil tasdiqdan o\'chirildi',
+                '?? Profil tasdiqdan o\'chirildi',
                 f'Salom, *{profile.user.name}*!\n'
                 f'Sizning profil tasdiqingiz olib tashlandi.\n'
                 f'Batafsil ma\'lumot uchun admin bilan bog\'laning.',
