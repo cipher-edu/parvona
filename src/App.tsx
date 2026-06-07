@@ -424,7 +424,7 @@ function nannyFromApi(n: Nanny): DisplayNanny {
     reviews: n.reviews_count,
     hourlyRate: formatHourlyRate(n.hourly_rate),
     imageUrl: n.user.photo || `https://ui-avatars.com/api/?name=${encodeURIComponent(n.user.name)}&background=7c3aed&color=fff`,
-    videoUrl: n.video_url || null,
+    videoUrl: n.video || null,
     bio: n.bio || '',
     skills: skillLabels,
     coordinates: (n.latitude && n.longitude) ? [n.latitude, n.longitude] as [number, number] : null as unknown as [number, number],

@@ -2,6 +2,7 @@ from django.contrib import admin
 from django.utils.html import format_html
 from django.utils import timezone
 from .models import NannyProfile
+from core.utils.cache import invalidate_nanny_cache
 
 
 @admin.register(NannyProfile)
@@ -22,9 +23,9 @@ class NannyProfileAdmin(admin.ModelAdmin):
 
     fieldsets = (
         ('Asosiy', {
-            'fields': ('id', 'user', 'age', 'experience', 'hourly_rate', 'bio', 'video_url')
+            'fields': ('id', 'user', 'age', 'experience', 'hourly_rate', 'bio', 'video')
         }),
-        ('Ko\'nikmalar', {
+        ("Ko'nikmalar", {
             'fields': ('skills',)
         }),
         ('Joylashuv', {
@@ -45,6 +46,10 @@ class NannyProfileAdmin(admin.ModelAdmin):
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related('user')
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        invalidate_nanny_cache(str(obj.id))
 
     def user_name(self, obj):
         return obj.user.name
@@ -78,15 +83,23 @@ class NannyProfileAdmin(admin.ModelAdmin):
     @admin.action(description='Tanlangan enagalarni tasdiqlash')
     def verify_nannies(self, request, queryset):
         queryset.update(is_verified=True, verified_at=timezone.now(), verified_by=request.user)
+        for nanny_id in queryset.values_list('id', flat=True):
+            invalidate_nanny_cache(str(nanny_id))
 
     @admin.action(description='Tasdiqni olib tashlash')
     def unverify_nannies(self, request, queryset):
         queryset.update(is_verified=False, verified_at=None, verified_by=None)
+        for nanny_id in queryset.values_list('id', flat=True):
+            invalidate_nanny_cache(str(nanny_id))
 
     @admin.action(description='Bloklash')
     def suspend_nannies(self, request, queryset):
         queryset.update(status='suspended')
+        for nanny_id in queryset.values_list('id', flat=True):
+            invalidate_nanny_cache(str(nanny_id))
 
     @admin.action(description='Faollashtirish')
     def activate_nannies(self, request, queryset):
         queryset.update(status='active')
+        for nanny_id in queryset.values_list('id', flat=True):
+            invalidate_nanny_cache(str(nanny_id))

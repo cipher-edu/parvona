@@ -1,15 +1,12 @@
 from rest_framework import serializers
 from apps.users.serializers import UserSerializer
-from .models import NannyProfile, NannySkill, NannyAvailability
+from .models import NannyProfile, NannySkill, NannyAvailability, NannyDocument
 
 
 VALID_SKILLS = [s.value for s in NannySkill]
 
 
 class NannyProfileSerializer(serializers.ModelSerializer):
-    """Ro'yxat uchun — qisqa."""
-    from django.utils import timezone as _tz
-
     user        = UserSerializer(read_only=True)
     distance_km = serializers.FloatField(read_only=True, required=False)
     is_pro      = serializers.SerializerMethodField()
@@ -28,7 +25,7 @@ class NannyProfileSerializer(serializers.ModelSerializer):
             'id', 'user', 'age', 'experience', 'hourly_rate',
             'skills', 'location_name', 'latitude', 'longitude',
             'rating', 'reviews_count', 'is_verified', 'is_pro', 'status',
-            'distance_km', 'created_at',
+            'distance_km', 'created_at', 'video',
         ]
         read_only_fields = [
             'id', 'user', 'rating', 'reviews_count',
@@ -37,32 +34,30 @@ class NannyProfileSerializer(serializers.ModelSerializer):
 
 
 class NannyProfileDetailSerializer(NannyProfileSerializer):
-    """Detail sahifa uchun — bio va video ham bor."""
     class Meta(NannyProfileSerializer.Meta):
-        fields = NannyProfileSerializer.Meta.fields + ['bio', 'video_url', 'updated_at']
+        fields = NannyProfileSerializer.Meta.fields + ['bio', 'updated_at']
 
 
 class NannyProfileWriteSerializer(serializers.ModelSerializer):
-    """Nanya o'z profilini yaratish/yangilash uchun."""
     class Meta:
         model  = NannyProfile
         fields = [
             'age', 'experience', 'hourly_rate', 'bio',
-            'skills', 'video_url', 'latitude', 'longitude', 'location_name',
+            'skills', 'video', 'latitude', 'longitude', 'location_name',
             'status',
         ]
 
     def validate_skills(self, value):
         if not isinstance(value, list):
-            raise serializers.ValidationError('Ko\'nikmalar ro\'yxat bo\'lishi kerak.')
+            raise serializers.ValidationError("Ko'nikmalar ro'yxat bo'lishi kerak.")
         invalid = [s for s in value if s not in VALID_SKILLS]
         if invalid:
-            raise serializers.ValidationError(f'Noto\'g\'ri ko\'nikmalar: {invalid}')
+            raise serializers.ValidationError(f"Noto'g'ri ko'nikmalar: {invalid}")
         return value
 
     def validate_hourly_rate(self, value):
-        if value < 10_000:
-            raise serializers.ValidationError('Minimal soatlik narx 10,000 so\'m.')
+        if value and value < 10_000:
+            raise serializers.ValidationError("Minimal soatlik narx 10,000 so'm.")
         return value
 
 
@@ -78,5 +73,14 @@ class NannyAvailabilitySerializer(serializers.ModelSerializer):
 
 
 class NannyAvailabilityWriteSerializer(serializers.Serializer):
-    """Bulk upsert: [{date, status}, ...]"""
     items = NannyAvailabilitySerializer(many=True)
+
+
+class NannyDocumentSerializer(serializers.ModelSerializer):
+    class Meta:
+        model  = NannyDocument
+        fields = [
+            'id', 'doc_type', 'file', 'description',
+            'status', 'review_note', 'reviewed_at', 'created_at',
+        ]
+        read_only_fields = ['id', 'status', 'review_note', 'reviewed_at', 'created_at']
