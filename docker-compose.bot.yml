@@ -1,0 +1,17 @@
+services:
+  telegram_bot:
+    build:
+      context: ./backend
+      args:
+        ENVIRONMENT: production
+    restart: always
+    command: ["python", "manage.py", "run_telegram_bot"]
+    env_file:
+      - ./backend/.env.prod
+    environment:
+      DB_HOST: db
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      DJANGO_SETTINGS_MODULE: config.settings.production
+      SKIP_SETUP: "true"
+    depends_on:
+      - api

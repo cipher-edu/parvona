@@ -9,6 +9,7 @@ export interface DjangoUser {
   role: 'parent' | 'nanny' | 'admin';
   is_active: boolean;
   created_at: string;
+  telegram_user_id: number | null;
 }
 
 export interface AuthTokens {
@@ -46,7 +47,7 @@ export interface Nanny {
   created_at: string;
   // Detail only
   bio?: string;
-  video_url?: string;
+  video?: string;
 }
 
 export interface NannyListParams {

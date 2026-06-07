@@ -17,6 +17,7 @@ from .views import (
     RegisterTelegramVerifyView,
     TelegramOTPLoginInitView,
     TelegramOTPLoginVerifyView,
+    TelegramConnectionView,
     AdminUserListView,
     AdminUserDetailView,
     AdminSuspendUserView,
@@ -39,13 +40,13 @@ urlpatterns = [
     path('register/telegram/verify/', RegisterTelegramVerifyView.as_view(),  name='register-telegram-verify'),
     path('telegram/otp/init/',        TelegramOTPLoginInitView.as_view(),    name='telegram-otp-login-init'),
     path('telegram/otp/verify/',      TelegramOTPLoginVerifyView.as_view(),  name='telegram-otp-login-verify'),
+    path('telegram/connect/',         TelegramConnectionView.as_view(),      name='telegram-connect-fallback'),
     path('token/refresh/',     TokenRefreshView.as_view(),  name='token-refresh'),
-
     # Profil
     path('me/',                MeView.as_view(),            name='me'),
     path('me/password/',       ChangePasswordView.as_view(), name='change-password'),
     path('me/referral/',       ReferralStatsView.as_view(),  name='referral-stats'),
-
+    path('me/telegram/connect/', TelegramConnectionView.as_view(), name='me-telegram-connect'),
     # Admin
     path('admin/users/',                AdminUserListView.as_view(),   name='admin-users'),
     path('admin/users/<uuid:id>/',      AdminUserDetailView.as_view(), name='admin-user-detail'),

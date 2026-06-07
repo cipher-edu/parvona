@@ -318,3 +318,26 @@ class AdminUnverifyNannyView(APIView):
         except Exception:
             pass
         return Response({'message': 'Enaga tasdiqlanmagan deb belgilandi', 'is_verified': False})
+
+class NannyDocumentListCreateView(generics.ListCreateAPIView):
+    """GET/POST /api/nannies/me/documents/"""
+    permission_classes = [IsNanny]
+
+    def get_serializer_class(self):
+        from .serializers import NannyDocumentSerializer
+        return NannyDocumentSerializer
+
+    def get_queryset(self):
+        from .models import NannyDocument
+        return NannyDocument.objects.filter(nanny=self.request.user)
+
+    def perform_create(self, serializer):
+        serializer.save(nanny=self.request.user)
+
+    @extend_schema(summary='Enaga hujjatlari')
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)
+
+    @extend_schema(summary='Hujjat yuklash')
+    def post(self, request, *args, **kwargs):
+        return super().post(request, *args, **kwargs)

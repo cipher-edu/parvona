@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { motion } from 'motion/react';
-import { Search, Star, MapPin, Clock } from 'lucide-react';
+import { Search, Star, MapPin, Clock, Play } from 'lucide-react';
 import { Card } from '../../components/ui/Card';
 import { Input, Select } from '../../components/ui/Input';
 import { Badge } from '../../components/ui/Badge';
@@ -54,6 +54,73 @@ function NannyPhoto({ photo, name, className = '' }: { photo: string | null; nam
     </div>
   );
 }
+
+// ─── VideoPlayer: suratni poster sifatida ko'rsatadi, play bosgach video ─────
+function VideoPlayer({ src, poster, name }: { src?: string; poster?: string; name: string }) {
+  const [playing, setPlaying] = React.useState(false);
+  const videoRef = React.useRef<HTMLVideoElement>(null);
+
+  const handlePlay = () => {
+    videoRef.current?.play().catch(() => {});
+    setPlaying(true);
+  };
+
+  // Video yo'q — faqat rasm yoki initials ko'rsatish
+  if (!src) {
+    if (poster) {
+      return <img src={poster} alt={name} className="w-full h-full object-cover" />;
+    }
+    return (
+      <div className="w-full h-full flex items-center justify-center bg-gradient-to-br from-purple-100 to-indigo-100">
+        <div className="w-20 h-20 rounded-full bg-gradient-to-br from-purple-500 to-indigo-600 flex items-center justify-center text-white text-3xl font-bold select-none">
+          {getInitials(name)}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="relative w-full h-full bg-slate-900">
+      <video
+        ref={videoRef}
+        className="w-full h-full object-cover"
+        controls={playing}
+        preload="none"
+        poster={poster || undefined}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+      >
+        <source src={src} />
+        Brauzeringiz video formatini qo'llab-quvvatlamaydi.
+      </video>
+
+      {/* Play tugmasi overlay — video boshlanmagunicha ko'rinadi */}
+      {!playing && (
+        <button
+          onClick={handlePlay}
+          className="absolute inset-0 flex items-center justify-center group"
+          aria-label="Videoni ijro etish"
+        >
+          {/* Poster rasm (surati) */}
+          {poster && (
+            <img
+              src={poster}
+              alt={name}
+              className="absolute inset-0 w-full h-full object-cover"
+            />
+          )}
+          {/* Qoraytirilgan overlay */}
+          <div className="absolute inset-0 bg-black/25 group-hover:bg-black/35 transition-colors" />
+          {/* Play circle */}
+          <div className="relative z-10 w-16 h-16 rounded-full bg-white/90 backdrop-blur-sm flex items-center justify-center shadow-xl group-hover:scale-110 transition-transform duration-200">
+            <Play className="w-7 h-7 text-purple-700 ml-1" fill="currentColor" />
+          </div>
+        </button>
+      )}
+    </div>
+  );
+}
+
 
 const SKILL_OPTIONS = [
   { value: '', label: 'Barcha ko\'nikmalar' },
@@ -330,6 +397,15 @@ export default function NannySearchPage() {
                   <span className="text-sm font-bold text-purple-700">{formatHourlyRate(selected.hourly_rate)}/soat</span>
                 </div>
               </div>
+            </div>
+
+            {/* ── Video / rasm ko'rsatish ────────────────────────────────── */}
+            <div className="relative w-full overflow-hidden rounded-2xl bg-slate-900" style={{ aspectRatio: '16/9' }}>
+              <VideoPlayer
+                src={selected.video}
+                poster={selected.user.photo || undefined}
+                name={selected.user.name}
+              />
             </div>
 
             {selected.bio && (

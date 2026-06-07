@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
-import { Camera, ShieldCheck, Mail, Phone, User as UserIcon } from 'lucide-react';
+import { Camera, ShieldCheck, Mail, Phone, User as UserIcon, MessageCircle, Link2, Unlink } from 'lucide-react';
 import { Card } from '../../components/ui/Card';
 import { Input } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
@@ -9,6 +9,7 @@ import { PageSpinner } from '../../components/ui/Spinner';
 import { PageHeader } from '../../components/layout/PageHeader';
 import { useAuthStore } from '../../store/useAuthStore';
 import { api } from '../../api/client';
+import { connectMyTelegram, disconnectMyTelegram } from '../../api/users';
 import { DjangoUser } from '../../api/types';
 
 interface ProfileForm {
@@ -25,6 +26,11 @@ export default function ProfilePage() {
   const [success, setSuccess]   = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [photoUploading, setPhotoUploading] = React.useState(false);
+  const [tgToken, setTgToken]         = useState('');
+  const [tgConnecting, setTgConnecting] = useState(false);
+  const [tgDisconnecting, setTgDisconnecting] = useState(false);
+  const [tgError, setTgError]         = useState('');
+  const [tgSuccess, setTgSuccess]     = useState('');
 
   useEffect(() => {
     if (!djangoUser) { setLoading(false); return; }
@@ -62,6 +68,39 @@ export default function ProfilePage() {
       alert('Saqlashda xatolik yuz berdi');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleTgConnect = async () => {
+    if (!tgToken.trim()) return;
+    setTgConnecting(true);
+    setTgError('');
+    setTgSuccess('');
+    try {
+      const updated = await connectMyTelegram(tgToken.trim());
+      setDjangoUser({ ...djangoUser!, ...updated });
+      setTgToken('');
+      setTgSuccess('Telegram muvaffaqiyatli ulandi!');
+      setTimeout(() => setTgSuccess(''), 4000);
+    } catch {
+      setTgError("Token noto'g'ri yoki muddati o'tgan. Botdan yangi token oling.");
+    } finally {
+      setTgConnecting(false);
+    }
+  };
+
+  const handleTgDisconnect = async () => {
+    setTgDisconnecting(true);
+    setTgError('');
+    try {
+      await disconnectMyTelegram();
+      setDjangoUser({ ...djangoUser!, telegram_user_id: null });
+      setTgSuccess('Telegram ulanishi uzildi.');
+      setTimeout(() => setTgSuccess(''), 3000);
+    } catch {
+      setTgError('Uzishda xatolik yuz berdi.');
+    } finally {
+      setTgDisconnecting(false);
     }
   };
 
@@ -145,6 +184,63 @@ export default function ProfilePage() {
             </>
           )}
         </div>
+      </Card>
+      <Card padding="lg" className="mt-6">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-9 h-9 rounded-xl bg-blue-50 flex items-center justify-center">
+            <MessageCircle className="w-5 h-5 text-blue-500" />
+          </div>
+          <div>
+            <h3 className="text-base font-semibold text-slate-900">Telegram ulash</h3>
+            <p className="text-xs text-slate-500">Bildirishnomalarni Telegram orqali oling</p>
+          </div>
+        </div>
+
+        {tgError && (
+          <div className="flex items-center gap-2 text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-4 py-3 mb-4">
+            {tgError}
+          </div>
+        )}
+        {tgSuccess && (
+          <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 border border-green-200 rounded-xl px-4 py-3 mb-4">
+            <ShieldCheck className="w-4 h-4 shrink-0" />{tgSuccess}
+          </div>
+        )}
+
+        {djangoUser?.telegram_user_id ? (
+          <div className="flex items-center justify-between p-4 bg-blue-50 rounded-xl border border-blue-100">
+            <div className="flex items-center gap-3">
+              <Link2 className="w-5 h-5 text-blue-500" />
+              <div>
+                <p className="text-sm font-medium text-slate-900">Telegram ulangan ✅</p>
+                <p className="text-xs text-slate-500">ID: {djangoUser.telegram_user_id}</p>
+              </div>
+            </div>
+            <Button variant="outline" size="sm" onClick={handleTgDisconnect} loading={tgDisconnecting}>
+              <Unlink className="w-4 h-4 mr-1.5" />Uzish
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 text-sm text-slate-600 space-y-1.5">
+              <p className="font-medium text-slate-700">Qanday ulash kerak?</p>
+              <p>1. <a href="https://t.me/Enagamuzbot" target="_blank" rel="noreferrer" className="text-blue-600 underline">@Enagamuzbot</a> ga o'ting</p>
+              <p>2. <code className="bg-slate-200 px-1 rounded">/connect</code> buyrug'ini yuboring</p>
+              <p>3. Tokenni quyidagi maydonga kiriting</p>
+            </div>
+            <div className="flex gap-3">
+              <Input
+                placeholder="Token (masalan: 4dEMJqZD...)"
+                value={tgToken}
+                onChange={e => setTgToken(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleTgConnect()}
+              />
+              <Button onClick={handleTgConnect} loading={tgConnecting} disabled={!tgToken.trim()}>
+                Ulash
+              </Button>
+            </div>
+          </div>
+        )}
       </Card>
     </div>
   );

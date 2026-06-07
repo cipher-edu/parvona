@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { motion } from 'motion/react';
-import { Camera, ShieldCheck, MapPin, Clock, DollarSign } from 'lucide-react';
+import { Camera, ShieldCheck, MapPin, Clock, DollarSign, MessageCircle, Link2, Unlink, Play, Upload } from 'lucide-react';
 import { Card } from '../../components/ui/Card';
 import { Input, Textarea } from '../../components/ui/Input';
 import { Button } from '../../components/ui/Button';
@@ -12,6 +12,7 @@ import { useAuthStore } from '../../store/useAuthStore';
 import { api } from '../../api/client';
 import { DjangoUser, Nanny } from '../../api/types';
 import { getMyNannyProfile, updateMyNannyProfile, SKILL_LABELS } from '../../api/nannies';
+import { connectMyTelegram, disconnectMyTelegram } from '../../api/users';
 
 const ALL_SKILLS = Object.entries(SKILL_LABELS).map(([v, l]) => ({ value: v, label: l }));
 
@@ -39,6 +40,13 @@ export default function NannyProfilePage() {
   const [success, setSuccess]     = useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const [photoUploading, setPhotoUploading] = React.useState(false);
+  const videoInputRef = React.useRef<HTMLInputElement>(null);
+  const [videoUploading, setVideoUploading] = React.useState(false);
+  const [tgToken, setTgToken]           = useState('');
+  const [tgConnecting, setTgConnecting] = useState(false);
+  const [tgDisconnecting, setTgDisconnecting] = useState(false);
+  const [tgError, setTgError]           = useState('');
+  const [tgSuccess, setTgSuccess]       = useState('');
 
   useEffect(() => {
     if (!djangoUser) { setLoading(false); return; }
@@ -89,6 +97,24 @@ export default function NannyProfilePage() {
     }
   };
 
+  const handleVideoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > 100 * 1024 * 1024) { alert('Video hajmi 100MB dan oshmasin'); return; }
+    setVideoUploading(true);
+    try {
+      const formData = new FormData();
+      formData.append('video', file);
+      const updated = await api.patch<Nanny>('/api/nannies/me/', formData);
+      setProfile(updated);
+    } catch {
+      alert("Video yuklanmadi. Qayta urinib ko'ring.");
+    } finally {
+      setVideoUploading(false);
+      e.target.value = '';
+    }
+  };
+
   const handleSave = async () => {
     setSaving(true);
     try {
@@ -111,6 +137,39 @@ export default function NannyProfilePage() {
       alert('Saqlashda xatolik yuz berdi');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const handleTgConnect = async () => {
+    if (!tgToken.trim()) return;
+    setTgConnecting(true);
+    setTgError('');
+    setTgSuccess('');
+    try {
+      const updated = await connectMyTelegram(tgToken.trim());
+      setDjangoUser({ ...djangoUser!, ...updated });
+      setTgToken('');
+      setTgSuccess('Telegram muvaffaqiyatli ulandi!');
+      setTimeout(() => setTgSuccess(''), 4000);
+    } catch {
+      setTgError("Token noto'g'ri yoki muddati o'tgan. Botdan yangi token oling.");
+    } finally {
+      setTgConnecting(false);
+    }
+  };
+
+  const handleTgDisconnect = async () => {
+    setTgDisconnecting(true);
+    setTgError('');
+    try {
+      await disconnectMyTelegram();
+      setDjangoUser({ ...djangoUser!, telegram_user_id: null });
+      setTgSuccess('Telegram ulanishi uzildi.');
+      setTimeout(() => setTgSuccess(''), 3000);
+    } catch {
+      setTgError('Uzishda xatolik yuz berdi.');
+    } finally {
+      setTgDisconnecting(false);
     }
   };
 
@@ -240,6 +299,118 @@ export default function NannyProfilePage() {
             </>
           )}
         </div>
+      </Card>
+      <Card padding="lg" className="mt-6">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-9 h-9 rounded-xl bg-blue-50 flex items-center justify-center">
+            <MessageCircle className="w-5 h-5 text-blue-500" />
+          </div>
+          <div>
+            <h3 className="text-base font-semibold text-slate-900">Telegram ulash</h3>
+            <p className="text-xs text-slate-500">Bildirishnomalarni Telegram orqali oling</p>
+          </div>
+        </div>
+
+        {tgError && (
+          <div className="text-sm text-red-700 bg-red-50 border border-red-200 rounded-xl px-4 py-3 mb-4">
+            {tgError}
+          </div>
+        )}
+        {tgSuccess && (
+          <div className="flex items-center gap-2 text-sm text-green-700 bg-green-50 border border-green-200 rounded-xl px-4 py-3 mb-4">
+            <ShieldCheck className="w-4 h-4 shrink-0" />{tgSuccess}
+          </div>
+        )}
+
+        {djangoUser?.telegram_user_id ? (
+          <div className="flex items-center justify-between p-4 bg-blue-50 rounded-xl border border-blue-100">
+            <div className="flex items-center gap-3">
+              <Link2 className="w-5 h-5 text-blue-500" />
+              <div>
+                <p className="text-sm font-medium text-slate-900">Telegram ulangan ✅</p>
+                <p className="text-xs text-slate-500">ID: {djangoUser.telegram_user_id}</p>
+              </div>
+            </div>
+            <Button variant="outline" size="sm" onClick={handleTgDisconnect} loading={tgDisconnecting}>
+              <Unlink className="w-4 h-4 mr-1.5" />Uzish
+            </Button>
+          </div>
+        ) : (
+          <div className="space-y-4">
+            <div className="p-4 bg-slate-50 rounded-xl border border-slate-200 text-sm text-slate-600 space-y-1.5">
+              <p className="font-medium text-slate-700">Qanday ulash kerak?</p>
+              <p>1. <a href="https://t.me/Enagamuzbot" target="_blank" rel="noreferrer" className="text-blue-600 underline">@Enagamuzbot</a> ga o'ting</p>
+              <p>2. <code className="bg-slate-200 px-1 rounded">/connect</code> buyrug'ini yuboring</p>
+              <p>3. Tokenni quyidagi maydonga kiriting</p>
+            </div>
+            <div className="flex gap-3">
+              <Input
+                placeholder="Token (masalan: 4dEMJqZD...)"
+                value={tgToken}
+                onChange={e => setTgToken(e.target.value)}
+                onKeyDown={e => e.key === 'Enter' && handleTgConnect()}
+              />
+              <Button onClick={handleTgConnect} loading={tgConnecting} disabled={!tgToken.trim()}>
+                Ulash
+              </Button>
+            </div>
+          </div>
+        )}
+      </Card>
+
+      {/* ── Taqdimot videosi ──────────────────────────────────────────────── */}
+      <Card padding="lg" className="mt-6">
+        <div className="flex items-center gap-3 mb-5">
+          <div className="w-9 h-9 rounded-xl bg-purple-50 flex items-center justify-center">
+            <Play className="w-5 h-5 text-purple-500" />
+          </div>
+          <div>
+            <h3 className="text-base font-semibold text-slate-900">Taqdimot videosi</h3>
+            <p className="text-xs text-slate-500">Video orqali o'zingizni tanishtiring (maks. 100 MB)</p>
+          </div>
+        </div>
+
+        {profile?.video ? (
+          <div className="relative w-full rounded-2xl overflow-hidden bg-slate-900 mb-4" style={{ aspectRatio: '16/9' }}>
+            <video
+              className="w-full h-full object-cover"
+              controls
+              preload="metadata"
+              poster={djangoUser?.photo || undefined}
+            >
+              <source src={profile.video} />
+            </video>
+          </div>
+        ) : (
+          <div
+            className="w-full rounded-2xl bg-slate-50 border-2 border-dashed border-slate-200 flex items-center justify-center mb-4 cursor-pointer hover:border-purple-300 hover:bg-purple-50 transition-colors"
+            style={{ aspectRatio: '16/9' }}
+            onClick={() => videoInputRef.current?.click()}
+          >
+            <div className="text-center text-slate-400 p-6">
+              <Play className="w-12 h-12 mx-auto mb-3 opacity-30" />
+              <p className="text-sm font-medium">Hali video yuklanmagan</p>
+              <p className="text-xs mt-1">MP4, MOV yoki WebM · Maks. 100 MB</p>
+            </div>
+          </div>
+        )}
+
+        <input
+          ref={videoInputRef}
+          type="file"
+          accept="video/mp4,video/quicktime,video/webm,video/avi"
+          className="hidden"
+          onChange={handleVideoUpload}
+        />
+        <Button
+          variant="outline"
+          onClick={() => videoInputRef.current?.click()}
+          loading={videoUploading}
+          fullWidth
+        >
+          <Upload className="w-4 h-4 mr-2" />
+          {profile?.video ? 'Videoni almashtirish' : 'Video yuklash'}
+        </Button>
       </Card>
     </div>
   );

@@ -28,6 +28,7 @@ def _get_provider(name: str):
     cls = PROVIDERS.get(name)
     if cls is None:
         raise ValueError(f"'{name}' provider hali amalga oshirilmagan. Mavjud: {list(PROVIDERS.keys())}")
+    return cls
 
 
 class InitiatePaymentView(APIView):
@@ -35,7 +36,7 @@ class InitiatePaymentView(APIView):
     permission_classes = [IsAuthenticated]
 
     @extend_schema(
-        summary='To\'lov boshlash',
+        summary="Tolov boshlash",
         request=InitiatePaymentSerializer,
         responses={200: {'type': 'object', 'properties': {'pay_url': {'type': 'string'}}}},
     )
@@ -214,7 +215,7 @@ class PaymentStatusView(APIView):
     """GET /api/payments/status/<booking_id>/ — to'lov holatini tekshirish."""
     permission_classes = [IsAuthenticated]
 
-    @extend_schema(summary='To\'lov holati')
+    @extend_schema(summary="Payment initiation")
     def get(self, request, booking_id):
         try:
             payment = Payment.objects.get(booking_id=booking_id)
@@ -241,7 +242,7 @@ class AdminPaymentListView(generics.ListAPIView):
     filterset_fields   = ['status', 'provider']
     ordering           = ['-created_at']
 
-    @extend_schema(summary='Admin: barcha to\'lovlar')
+    @extend_schema(summary="Admin: barcha tolovlar")
     def list(self, request, *args, **kwargs):
         return super().list(request, *args, **kwargs)
 
@@ -250,7 +251,7 @@ class AdminPaymentStatsView(APIView):
     """Admin: to'lov statistikasi. GET /api/admin/payments/stats/"""
     permission_classes = [IsAdminRole]
 
-    @extend_schema(summary='Admin: to\'lov statistikasi')
+    @extend_schema(summary="Admin: tolov statistikasi")
     def get(self, request):
         from django.db.models import Sum
         total_revenue = Payment.objects.filter(status='paid').aggregate(s=Sum('amount'))['s'] or 0
@@ -260,3 +261,20 @@ class AdminPaymentStatsView(APIView):
             'failed_count':  Payment.objects.filter(status='failed').count(),
             'pending_count': Payment.objects.filter(status='pending').count(),
         })
+
+
+class UserPaymentListView(generics.ListAPIView):
+    """GET /api/payments/ — Foydalanuvchining to'lovlari."""
+    permission_classes = [IsAuthenticated]
+    serializer_class   = PaymentSerializer
+
+    def get_queryset(self):
+        user = self.request.user
+        from django.db.models import Q
+        return Payment.objects.filter(
+            Q(booking__parent=user) | Q(booking__nanny=user)
+        ).select_related('booking', 'booking__parent', 'booking__nanny').order_by('-created_at')
+
+    @extend_schema(summary="Payments list")
+    def get(self, request, *args, **kwargs):
+        return super().get(request, *args, **kwargs)

@@ -9,6 +9,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.core.cache import cache
+from django.utils import timezone
 from drf_spectacular.utils import extend_schema, OpenApiResponse
 
 from core.permissions import IsAdminRole
@@ -1243,3 +1244,91 @@ class AdminStatsView(APIView):
             'new_users_this_month':   User.objects.filter(created_at__gte=this_month_start).count(),
             'revenue_growth':         revenue_growth,
         })
+
+class TelegramConnectView(APIView):
+    """POST /api/auth/me/telegram/connect/ and /api/auth/telegram/connect/ (fallback)"""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(
+        summary='Telegram akkauntini ulash',
+        request={'application/json': {'type': 'object', 'properties': {'token': {'type': 'string'}}}},
+    )
+    def post(self, request):
+        from django.core.cache import cache
+        token = request.data.get('token', '').strip()
+        if not token:
+            return Response({'detail': 'token maydoni talab qilinadi.'}, status=400)
+        cache_key = f'tg_connect_token:{token}'
+        telegram_user_id = cache.get(cache_key)
+        if not telegram_user_id:
+            return Response(
+                {'detail': 'Token topilmadi yoki muddati tugagan.'},
+                status=400,
+            )
+        other = User.objects.filter(
+            telegram_user_id=telegram_user_id
+        ).exclude(pk=request.user.pk).first()
+        if other:
+            return Response(
+                {'detail': "Bu Telegram akkaunt boshqa foydalanuvchiga bog'langan."},
+                status=400,
+            )
+        request.user.telegram_user_id = telegram_user_id
+        request.user.save(update_fields=['telegram_user_id'])
+        cache.delete(cache_key)
+        return Response({
+            'message': 'Telegram akkaunt muvaffaqiyatli ulandi.',
+            'user': UserSerializer(request.user).data,
+        })
+
+
+class TelegramDisconnectView(APIView):
+    """DELETE /api/auth/me/telegram/connect/ and /api/auth/telegram/connect/ (fallback)"""
+    permission_classes = [IsAuthenticated]
+
+    @extend_schema(summary='Telegram akkauntini uzish')
+    def delete(self, request):
+        if not request.user.telegram_user_id:
+            return Response({'detail': 'Telegram akkaunt ulangan emas.'}, status=400)
+        request.user.telegram_user_id = None
+        request.user.save(update_fields=['telegram_user_id'])
+        return Response({'message': 'Telegram akkaunt uzildi.'})
+
+class TelegramConnectionView(APIView):
+    """POST+DELETE /api/auth/me/telegram/connect/ and /api/auth/telegram/connect/"""
+    permission_classes = [IsAuthenticated]
+
+    def post(self, request):
+        from django.core.cache import cache
+        token = request.data.get('token', '').strip()
+        if not token:
+            return Response({'detail': 'token maydoni talab qilinadi.'}, status=400)
+        cache_key = f'tg_connect_token:{token}'
+        telegram_user_id = cache.get(cache_key)
+        if not telegram_user_id:
+            return Response(
+                {'detail': 'Token topilmadi yoki muddati tugagan. Botga /connect yuboring.'},
+                status=400,
+            )
+        other = User.objects.filter(
+            telegram_user_id=telegram_user_id
+        ).exclude(pk=request.user.pk).first()
+        if other:
+            return Response(
+                {'detail': "Bu Telegram akkaunt boshqa foydalanuvchiga bog'langan."},
+                status=400,
+            )
+        request.user.telegram_user_id = telegram_user_id
+        request.user.save(update_fields=['telegram_user_id'])
+        cache.delete(cache_key)
+        return Response({
+            'message': 'Telegram akkaunt muvaffaqiyatli ulandi.',
+            'user': UserSerializer(request.user).data,
+        })
+
+    def delete(self, request):
+        if not request.user.telegram_user_id:
+            return Response({'detail': 'Telegram akkaunt ulangan emas.'}, status=400)
+        request.user.telegram_user_id = None
+        request.user.save(update_fields=['telegram_user_id'])
+        return Response({'message': 'Telegram akkaunt uzildi.'})
